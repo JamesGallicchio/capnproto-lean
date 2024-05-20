@@ -1,0 +1,25 @@
+name = "capnproto-lean"
+defaultTargets = ["CapnProtoLean"]
+testRunner = "test"
+precompileModules = false # We would like to turn this on, but it breaks the Mathlib cache.
+
+[[require]]
+name = "batteries"
+git = "https://github.com/leanprover-community/batteries"
+rev = "main"
+
+[[require]]
+name = "Qq"
+git = "https://github.com/leanprover-community/quote4"
+rev = "master"
+
+[[lean_lib]]
+name = "CapnProtoLean"
+
+[[lean_lib]]
+name = "CapnProtoLeanTest"
+globs = ["CapnProtoLeanTest.+"]
+
+[[lean_exe]]
+name = "test"
+srcDir = "scripts"
