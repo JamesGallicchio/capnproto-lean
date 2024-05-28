@@ -1,4 +1,4 @@
-import CapnProtoLean.Basic
+import CapnProtoLean.Encoding
 import CapnProtoLean.Meta
 
 namespace CapnProtoLean
@@ -7,35 +7,16 @@ open Meta
 
 abbrev Id := UInt64
 
-declare_nonempty_type Node
-declare_nonempty_type Field
-declare_nonempty_type ElementSize
-declare_nonempty_type Enumerant
-declare_nonempty_type Method
-declare_nonempty_type Superclass
-declare_nonempty_type «Type»
-declare_nonempty_type Value
-declare_nonempty_type Annotation
-declare_nonempty_type Brand
+mutual
+inductive Node.Parameter
+| mk (name : Text)
 
-namespace Node
+inductive Node.NestedNode
+| mk
+  (name : Text)
+  (id : Id)
 
-declare_nonempty_type Parameter
-declare_nonempty_type NestedNode
-declare_nonempty_type SourceInfo
-
-structure Parameter.View where
-  name : Text
-deriving Inhabited
-declare_view Parameter Parameter.View
-
-structure NestedNode.View where
-  name : Text
-  id : Id
-deriving Inhabited
-declare_view NestedNode NestedNode.View
-
-inductive Body : Type
+inductive Node.Body : Type
 | file
 | struct
   (dataWordCount : UInt16)
@@ -67,29 +48,23 @@ inductive Body : Type
   (targetsMethod : «Type»)
   (targetsParam : «Type»)
   (targetsAnnotation : «Type»)
-deriving Inhabited
 
-structure View where
-  id : Id
-  displayName : Text
-  displayNamePrefixLength : UInt32
-  scopeId : Id
-  parameters : List Parameter
-  isGeneric : Bool
-  nestedNodes : List NestedNode
-  annotations : List Annotation
-  body : Body
-deriving Inhabited
+inductive Node.SourceInfo
+| mk
 
-end Node
+inductive Node
+| mk
+  (id : Id)
+  (displayName : Text)
+  (displayNamePrefixLength : UInt32)
+  (scopeId : Id)
+  (parameters : List Node.Parameter)
+  (isGeneric : Bool)
+  (nestedNodes : List Node.NestedNode)
+  (annotations : List Annotation)
+  (body : Body)
 
-declare_view Node Node.View
-
-namespace Field
-
-declare_nonempty_type Annotation
-
-inductive Body
+inductive Field.Body
 | slot
   (offset : UInt32)
   (type : «Type»)
@@ -97,28 +72,21 @@ inductive Body
   (hadExplicitDefault : Bool)
 | group
   (typeId : Id)
-deriving Inhabited
 
-inductive Ordinal
+inductive Field.Ordinal
 | implicit
 | explicit (_ : UInt16)
-deriving Inhabited
 
-structure View where
-  name : Text
-  codeOrder : UInt16
-  annotations : List Annotation
-  discriminantValue : UInt16
-  body : Body
-  ordinal : Ordinal
-deriving Inhabited
+inductive Field
+| mk
+  (name : Text)
+  (codeOrder : UInt16)
+  (annotations : List Annotation)
+  (discriminantValue : UInt16)
+  (body : Field.Body)
+  (ordinal : Field.Ordinal)
 
-end Field
-declare_view Field Field.View
-
-namespace ElementSize
-
-inductive Enum
+inductive ElementSize
 | empty
 | bit
 | byte
@@ -127,60 +95,44 @@ inductive Enum
 | eightBytes
 | pointer
 | inlineComposite
-deriving Inhabited
 
-end ElementSize
+inductive Enumerant
+| mk
+  (name : Text)
+  (codeOrder : UInt16)
+  (annotations : List Annotation)
 
-declare_view ElementSize ElementSize.Enum
+inductive Superclass
+| mk
+  (id : Id)
+  (brand : Brand)
 
-namespace Enumerant
-structure View where
-  name : Text
-  codeOrder : UInt16
-  annotations : List Annotation
-deriving Inhabited
-end Enumerant
-declare_view Enumerant Enumerant.View
+inductive Method
+| mk
+  (name : Text)
+  (codeOrder : UInt16)
+  (implicitParameters : List Node.Parameter)
+  (paramStructType : Id)
+  (paramBrand : Brand)
+  (resultStructType : Id)
+  (resultBrand : Brand)
+  (annotations : List Annotation)
 
-namespace Superclass
-structure View where
-  id : Id
-  brand : Brand
-deriving Nonempty
-end Superclass
-declare_view Superclass Superclass.View
-
-namespace Method
-structure View where
-  name : Text
-  codeOrder : UInt16
-  implicitParameters : List Node.Parameter
-  paramStructType : Id
-  paramBrand : Brand
-  resultStructType : Id
-  resultBrand : Brand
-  annotations : List Annotation
-deriving Nonempty
-end Method
-declare_view Method Method.View
-
-namespace «Type»
-
-inductive Body.AnyPointer.Unconstrained
+inductive «Type».Body.AnyPointer.Unconstrained
 | anyKind
 | struct
 | list
 | capability
 
-inductive Body.AnyPointer
-| unconstrained (u : Body.AnyPointer.Unconstrained)
+inductive «Type».Body.AnyPointer
+| unconstrained (u : «Type».Body.AnyPointer.Unconstrained)
 | parameter
   (scopeId : Id)
   (parameterIndex : UInt16)
 | implicitMethodParameter
   (parameterIndex : UInt16)
 
-inductive Body
+inductive «Type».Body
 | void
 | bool
 | int8
@@ -206,54 +158,34 @@ inductive Body
 | interface
   (typeId : Id)
   (brand : Brand)
-| anyPointer (a : Body.AnyPointer)
-deriving Inhabited
+| anyPointer (a : «Type».Body.AnyPointer)
 
-structure View where
-  body : Body
-deriving Inhabited
+inductive «Type»
+| mk
+  (body : Body)
 
-end «Type»
-declare_view «Type» «Type».View
-
-namespace Brand
-declare_nonempty_type Scope
-declare_nonempty_type Binding
-
-namespace Scope
-inductive Body
-| bind (l : List Binding)
+inductive Brand.Scope.Body
+| bind (l : List Brand.Binding)
 | inherit
-deriving Inhabited
 
-structure View where
-  scopeId : Id
-  body : Body
-deriving Inhabited
-end Scope
-declare_view Scope Scope.View
+inductive Brand.Scope
+| mk
+  (scopeId : Id)
+  (body : Brand.Scope.Body)
 
-
-namespace Binding
-inductive Body
+inductive Brand.Binding.Body
 | unbound
 | type (t : «Type»)
-deriving Nonempty
 
-structure View where
-  body : Body
-deriving Nonempty
-end Binding
-declare_view Binding Binding.View
+inductive Brand.Binding
+| mk
+  (body : Brand.Binding.Body)
 
-structure View where
-  scopes : List Scope
-deriving Nonempty
-end Brand
-declare_view Brand Brand.View
+inductive Brand
+| mk
+  (scopes : List Brand.Scope)
 
-namespace Value
-inductive Body
+inductive Value.Body
 | void (_ : Unit)
 | bool (_ : Bool)
 | int8 (_ : Int8)
@@ -273,74 +205,48 @@ inductive Body
 | struct (_ : AnyPointer)
 | interface
 | anyPointer (_ : AnyPointer)
-deriving Nonempty
 
-structure View where
-  body : Body
-deriving Nonempty
-end Value
-declare_view Value Value.View
+inductive Value
+| mk
+  (body : Value.Body)
 
-namespace Annotation
-structure View where
-  id : Id
-  brand : Brand
-  value : Value
-deriving Nonempty
-end Annotation
-declare_view Annotation Annotation.View
+inductive Annotation
+| mk
+  (id : Id)
+  (brand : Brand)
+  (value : Value)
 
-declare_nonempty_type CapnpVersion
+end
 
-namespace CapnpVersion
-structure View where
+
+structure CapnpVersion where
   major : UInt16
   minor : UInt8
   micro : UInt8
-deriving Inhabited, Repr
-end CapnpVersion
-declare_view CapnpVersion CapnpVersion.View
+
 namespace CapnpVersion
-instance : Inhabited CapnpVersion := ⟨.ofView default⟩
-instance : Repr CapnpVersion := ⟨(reprPrec ·.view)⟩
-instance : ToString View where
-  toString x := s!"{x.major}.{x.minor}.{x.micro}"
+deriving instance Inhabited, Repr for CapnpVersion
 instance : ToString CapnpVersion where
-  toString x := toString x.view
+  toString x := s!"{x.major}.{x.minor}.{x.micro}"
 end CapnpVersion
 
-declare_nonempty_type CodeGeneratorRequest
 
-namespace CodeGeneratorRequest
-declare_nonempty_type RequestedFile
+inductive CodeGeneratorRequest.RequestedFile.Import
+| mk
+  (id : Id)
+  (name : Text)
 
-namespace RequestedFile
-declare_nonempty_type Import
+inductive CodeGeneratorRequest.RequestedFile
+| mk
+  (id : Id)
+  (filename : Text)
+  (imports : List CodeGeneratorRequest.RequestedFile.Import)
 
-namespace Import
-structure View where
-  id : Id
-  name : Text
-deriving Nonempty
-end Import
-declare_view Import Import.View
-
-structure View where
-  id : Id
-  filename : Text
-  imports : List Import
-deriving Nonempty
-end RequestedFile
-declare_view RequestedFile RequestedFile.View
-
-structure View where
+structure CodeGeneratorRequest where
   capnpVersion : CapnpVersion
   nodes : List Node
   sourceInfo : List Node.SourceInfo
-  requestedFiles : List RequestedFile
-deriving Inhabited
-end CodeGeneratorRequest
-declare_view CodeGeneratorRequest CodeGeneratorRequest.View
+  requestedFiles : List CodeGeneratorRequest.RequestedFile
 
 partial def CodeGeneratorRequest.fromBytes [Monad m]
       (getBytes : m (Option ByteArray)) : m CodeGeneratorRequest := do
