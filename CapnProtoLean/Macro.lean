@@ -26,14 +26,17 @@ scoped elab "generate_capnproto" e:term : command => do
   }
 
   let out : IO.FS.Handle := capnpc.stdout
-  let req : CodeGeneratorRequest ← liftM (m := IO) <|
-    CodeGeneratorRequest.fromBytes (do
-      let bs ← out.read (1 <<< 12).toUSize
-      if bs.isEmpty then return none else return some bs)
+  let msg : Message ← liftM (m := IO) <| Message.fromHandle out
+
+  let _ ← dbgTrace s!"successfully parsed message: {msg.segments.map (·.data.size)}" fun () => pure ()
+  let remaining ← out.readBinToEnd
+  let _ ← dbgTrace s!"{remaining.size} bytes left in stream" fun () => pure ()
 
   if (← capnpc.wait) ≠ 0 then
-    let err ← IO.FS.Handle.readToEnd capnpc.stderr
+    let err ← capnpc.stderr.readToEnd
     throwError "capnpc returned error:\n{err}"
 
-  dbgTrace s!"got request with at capnp version {req.view.capnpVersion}" fun () => do
+  --let req : CodeGeneratorRequest ← liftM (m := IO) <|
+  --  IO.ofExcept <| msg.decode CodeGeneratorRequest.decoder
+
   return

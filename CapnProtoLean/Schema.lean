@@ -248,11 +248,5 @@ structure CodeGeneratorRequest where
   sourceInfo : List Node.SourceInfo
   requestedFiles : List CodeGeneratorRequest.RequestedFile
 
-partial def CodeGeneratorRequest.fromBytes [Monad m]
-      (getBytes : m (Option ByteArray)) : m CodeGeneratorRequest := do
-  let mut bytes := 0
-  while true do
-    match ← getBytes with
-    | none => break
-    | some bs => bytes := bytes + bs.size
-  return .ofView default
+def CodeGeneratorRequest.decoder : Segment.Decoder CodeGeneratorRequest := do
+  sorry

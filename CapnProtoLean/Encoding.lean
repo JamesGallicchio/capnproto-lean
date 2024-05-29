@@ -48,7 +48,7 @@ end StructPointer
 
 structure ListPointer where
   p : AnyPointer
-  isStruct : p.isList
+  isList : p.isList
 
 namespace ListPointer
 instance : Inhabited ListPointer := ⟨⟨⟨1⟩, by decide⟩⟩
@@ -89,7 +89,7 @@ end ListPointer
 
 structure FarPointer where
   p : AnyPointer
-  isStruct : p.isFar
+  isFar : p.isFar
 
 namespace FarPointer
 instance : Inhabited FarPointer := ⟨⟨⟨2⟩, by decide⟩⟩
@@ -141,7 +141,7 @@ end FarPointer
 
 structure OtherPointer where
   p : AnyPointer
-  isStruct : p.isOther
+  isOther : p.isOther
 
 namespace OtherPointer
 instance : Inhabited OtherPointer := ⟨⟨⟨3⟩, by decide⟩⟩
@@ -160,6 +160,94 @@ deriving Inhabited
 structure Segment where
   data : ByteArray
 deriving Inhabited
+
+structure Message where
+  segments : Array Segment
+deriving Inhabited
+
+structure Segment.Loc where
+  /-- Index within a segment, in *bytes* -/
+  idx : Nat
+
+structure Message.Loc extends Segment.Loc where
+  /-- Index of segment in message -/
+  segIdx : Nat
+
+inductive Message.DecodeError
+| segIdxOutOfRange (idx : Nat) (ctx : String)
+| other (s : String)
+
+namespace Message.DecodeError
+instance : ToString Message.DecodeError where
+  toString
+    | .segIdxOutOfRange idx ctx => s!"Segment index {idx} out of range: {ctx}"
+    | .other s => s
+end Message.DecodeError
+
+inductive Segment.DecodeError
+| msg (m : Message.DecodeError)
+| farPointer (fp : FarPointer)
+
+def Segment.Decoder := ReaderT Segment <| ReaderT Segment.Loc <| Except Segment.DecodeError
+deriving Monad
+
+def Message.Decoder := ReaderT Message <| ReaderT Message.Loc <| Except DecodeError
+deriving Monad
+
+def Segment.Decoder.toMessage (d : Segment.Decoder α) : Message.Decoder α :=
+  fun msg {segIdx,idx} =>
+  if h : segIdx < msg.segments.size then
+    let seg := msg.segments[segIdx]
+    match d seg {idx} with
+    | .ok a => .ok a
+    | .error (.msg m) => throw m
+    | .error (.farPointer fp) =>
+      if fp.landingPadIsFar then
+        throw (.other "far pointer with far landing pad not yet supported")
+      else
+        throw (.other "far pointers not yet supported")
+  else
+    throw (.segIdxOutOfRange segIdx s!"{segIdx} out of range for array of size {msg.segments.size}")
+
+namespace Message
+
+instance : MonadLift (Segment.Decoder) (Message.Decoder) where
+  monadLift := Segment.Decoder.toMessage
+
+def decode (f : Message.Decoder α) (msg : Message) : Except Message.DecodeError α :=
+  f msg {segIdx := 0, idx := 0}
+
+partial def fromHandle (h : IO.FS.Handle) : IO Message := do
+  -- Number of segments is the first UInt32 of the stream, plus 1
+  let numSegs := (← readUInt32) + 1
+  let mut sizeSegs := #[]
+  for _ in [0:numSegs.val] do
+    sizeSegs := sizeSegs.push (← readUInt32)
+  if (4 + numSegs*4) % 8 = 4 then
+    let _ ← readUInt32
+  let segs : Array Segment ← sizeSegs.mapM (fun size =>
+    return {data := ← readBytesExact (8 * size.toUSize)}
+  )
+  return {segments := segs}
+where
+  readUInt32 : IO UInt32 := do
+    let bytes ← readBytesExact 4
+    if h : bytes.size = 4 then
+      return bytes.ugetUInt32LE 0 (by rw [h]; decide)
+    throw (.userError s!"readBytesExact: expected 4 bytes, got {bytes.size}")
+  readBytesExact (size : USize) : IO ByteArray := do
+    readBytesExactAux size (ByteArray.mkEmpty size.val)
+  readBytesExactAux (size : USize) (acc : ByteArray) : IO ByteArray := do
+    if size = 0 then
+      return acc
+    let new ← h.read size
+    let newLen := new.size.toUSize
+    if newLen = 0 then
+      throw (.userError s!"readBytesExact: reached EOF")
+    let acc := acc ++ new
+    readBytesExactAux (size - newLen) acc
+
+end Message
 
 namespace Segment
 
@@ -297,23 +385,4 @@ def getStructFloat64 (ptrIdx : UInt32) (s : StructPointer) (offset : UInt32)
   getStructUInt64 ptrIdx s offset seg
   |> Float64.ofUInt64
 
-
-
 end Segment
-
-structure Message where
-  segments : Array Segment
-deriving Inhabited
-
-namespace Message
-
-end Message
-
-inductive DecodeError
-
-def DecodeM := ReaderT Message (Except DecodeError)
-deriving Monad
-
-namespace Message
-
-end Message
