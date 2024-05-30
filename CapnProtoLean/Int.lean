@@ -27,6 +27,9 @@ def ByteArray.ugetUInt16LE (A : ByteArray) (i : USize)
 def Int32 := UInt32
 def Int32.ofUInt32 : UInt32 → Int32 := id
 
+instance : HAdd UInt32 Int32 UInt32 where
+  hAdd := fun (x y : UInt32) => x + y
+
 def UInt32.shiftArithRight (x y : UInt32) : UInt32 :=
   (x >>> y) ||| (0 - ((x &&& 0x80000000) >>> y))
 
