@@ -26,17 +26,26 @@ scoped elab "generate_capnproto" e:term : command => do
   }
 
   let out : IO.FS.Handle := capnpc.stdout
-  let msg : Message ← liftM (m := IO) <| Message.fromHandle out
 
-  let _ ← dbgTrace s!"successfully parsed message: {msg.segments.map (·.data.size)}" fun () => pure ()
-  let remaining ← out.readBinToEnd
-  let _ ← dbgTrace s!"{remaining.size} bytes left in stream" fun () => pure ()
+  let msg ← try
+    let msg : Message ← liftM (m := IO) <| Message.fromHandle out
 
-  if (← capnpc.wait) ≠ 0 then
-    let err ← capnpc.stderr.readToEnd
-    throwError "capnpc returned error:\n{err}"
+    logInfo m!"successfully parsed message: {msg.segments.map (·.data.size)}"
+    let remaining ← out.readBinToEnd
+    logInfo s!"{remaining.size} bytes left in stream"
+    pure msg
+  catch e =>
+    logError m!"Error parsing standard out: {e.toMessageData}"
+    let stderr ← capnpc.stderr.readToEnd
+    logError m!"Standard error output from capnc: {stderr}"
+    logError m!"capnpc returned {← capnpc.wait}"
+    throw e
 
-  --let req : CodeGeneratorRequest ← liftM (m := IO) <|
-  --  IO.ofExcept <| msg.decode CodeGeneratorRequest.decoder
+  let req : CodeGeneratorRequest ←
+    match decode CodeGeneratorRequest.decoder msg with
+    | .ok (some req) => pure req
+    | .ok none => throwError "root was none?"
+    | .error e =>
+      throwError s!"decode error: {e}"
 
-  return
+  let _ ← dbgTrace s!"{repr req}" fun () => pure ()

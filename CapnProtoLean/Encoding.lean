@@ -3,13 +3,17 @@ import Batteries
 
 namespace CapnProtoLean
 
+instance : Repr ByteArray where
+  reprPrec arr prec :=
+    .group ("ByteArray.mk" ++ .line ++ reprPrec arr.data prec)
+
 structure Segment where
   data : ByteArray
-deriving Inhabited
+deriving Inhabited, Repr
 
 structure Message where
   segments : Array Segment
-deriving Inhabited
+deriving Inhabited, Repr
 
 structure Segment.Loc where
   /-- Index within a segment, in *bytes* -/
@@ -19,13 +23,17 @@ structure Message.Loc extends Segment.Loc where
   /-- Index of segment in message -/
   segIdx : UInt32
 
+instance : ToString Message.Loc where
+  toString := fun {segIdx, idx} =>
+    s!"{segIdx}:{idx}"
+
 structure UnparsedValue where
   msg : Message
   loc : Message.Loc
 
 structure AnyPointer where
   data : UInt64
-deriving Inhabited
+deriving Inhabited, Repr
 
 namespace AnyPointer
 
@@ -40,6 +48,11 @@ def isFar (p : AnyPointer) : Bool :=
 def isOther (p : AnyPointer) : Bool :=
   p.data &&& 0x3 = 3
 
+instance : ToString AnyPointer where
+  toString p :=
+    let digits := Nat.toDigits 16 p.data.toNat
+    let digits := List.leftpad 16 '0' digits
+    String.mk ('0' :: 'x' :: digits)
 end AnyPointer
 
 structure SegmentPointer extends AnyPointer where
@@ -191,51 +204,45 @@ end Data
 def Text := Data
 deriving Inhabited
 
-inductive DecodeError
-| segIdxOutOfRange (idx : UInt32) (ctx : String)
-| other (s : String)
+def DecodeCtx := List (String × Message.Loc)
+
+structure DecodeError where
+  msg : Message
+  context : DecodeCtx
+  error : String
+  loc : Message.Loc
 
 namespace DecodeError
 instance : ToString DecodeError where
-  toString
-    | .segIdxOutOfRange idx ctx => s!"Segment index {idx} out of range: {ctx}"
-    | .other s => s
+  toString err :=
+    match err with
+    | {msg:=_, context, error, loc} =>
+      s!"{loc} {error}\n" ++ (
+        context.map (fun (name, loc) => s!"{loc} {name}\n")
+        |> String.join)
 end DecodeError
 
-def Segment.Decoder := ReaderT Segment <| ReaderT Segment.Loc <| Except DecodeError
+def Decoder := ReaderT Message <| ReaderT Message.Loc <| ReaderT DecodeCtx <| Except DecodeError
 deriving Monad, MonadExcept
 
-def Segment.StructDecoder (α : Type) := (dataWords ptrWords : UInt16) → Segment.Decoder α
-def Segment.StructDecoder.run (dataWords ptrWords : UInt16) (d : StructDecoder α) : Decoder α :=
+def StructDecoder (α : Type) := (dataWords ptrWords : UInt16) → Decoder α
+def StructDecoder.run (dataWords ptrWords : UInt16) (d : StructDecoder α) : Decoder α :=
   d dataWords ptrWords
 
-def Message.Decoder := ReaderT Message <| ReaderT Message.Loc <| Except DecodeError
-deriving Monad, MonadExcept
-
-def Segment.Decoder.toMessage (d : Segment.Decoder α) : Message.Decoder α :=
-  fun msg {segIdx,idx} =>
-  if h : segIdx.val < msg.segments.size then
-    let seg := msg.segments.uget segIdx.toUSize h
-    d seg {idx}
-  else
-    throw (.segIdxOutOfRange segIdx s!"{segIdx} out of range for message with {msg.segments.size} segments")
 
 namespace Message
 
-instance : MonadLift (Segment.Decoder) (Message.Decoder) where
-  monadLift := Segment.Decoder.toMessage
-
-def decode (f : Message.Decoder α) (msg : Message) : Except DecodeError α :=
-  f msg {segIdx := 0, idx := 0}
-
 partial def fromHandle (h : IO.FS.Handle) : IO Message := do
   -- Number of segments is the first UInt32 of the stream, plus 1
-  let numSegs := (← readUInt32) + 1
-  let mut sizeSegs := #[]
-  for _ in [0:numSegs.val] do
-    sizeSegs := sizeSegs.push (← readUInt32)
-  if (4 + numSegs*4) % 8 = 4 then
-    let _ ← readUInt32
+  let sizeSegs ← try (do
+    let numSegs := (← readUInt32) + 1
+    let mut sizeSegs := #[]
+    for _ in [0:numSegs.val] do
+      sizeSegs := sizeSegs.push (← readUInt32)
+    if (4 + numSegs*4) % 8 = 4 then
+      let _ ← readUInt32
+    return sizeSegs)
+    catch _ => throw (.userError "Failed to parse message header")
   let segs : Array Segment ← sizeSegs.mapM (fun size =>
     return {data := ← readBytesExact (8 * size.toUSize)}
   )
@@ -262,122 +269,150 @@ end Message
 
 namespace Decoder
 
+/-- Report an error, with context -/
+def error (s : String) : Decoder α :=
+  fun msg loc context => do
+  throw {
+    msg, context, loc, error := s
+  }
+
+@[inline]
+def context (name : String) (d : Decoder α) : Decoder α :=
+  fun msg loc context => d msg loc ((name, loc) :: context)
+
+@[inline]
+def getMsg : Decoder Message := fun msg _ _ => pure msg
+
+@[inline]
+def getLoc : Decoder Message.Loc := fun _ loc _ => pure loc
+
+@[inline]
+def getSeg : Decoder Segment := do
+  let msg ← getMsg
+  let loc ← getLoc
+  if h : _ then
+    return msg.segments.uget loc.segIdx.toUSize h
+  else
+    error s!"segment idx out of range (message has {msg.segments.size} segments)"
+
 /-- Read a `Bool` at the current location. -/
 @[inline]
-def bool (bit : UInt8) : Segment.Decoder Bool :=
-  fun seg loc =>
-    if h : loc.idx.val < seg.data.size then
+def bool (bit : UInt8) : Decoder Bool :=
+  context "bool" <| do
+    let seg ← getSeg
+    let loc ← getLoc
+    if h : _ then
       let byte := seg.data.uget loc.idx.toUSize h
       pure <| (byte >>> bit) &&& 0b1 = 0b1
     else
-      throw (.other
-        s!"uint8 out of range: {loc.idx} with segment size {seg.data.size}"
-      )
+      error s!"idx out of range: segment {loc.segIdx} has {seg.data.size} bytes"
 
 /-- Read a `UInt8` at the current location. -/
 @[inline]
-def uint8 : Segment.Decoder UInt8 :=
-  fun seg loc =>
-    if h : loc.idx.val < seg.data.size then
+def uint8 : Decoder UInt8 :=
+  context "uint8" <| do
+    let seg ← getSeg
+    let loc ← getLoc
+    if h : _ then
       pure (seg.data.uget loc.idx.toUSize h)
     else
-      throw (.other
-        s!"uint8 out of range: {loc.idx} with segment size {seg.data.size}"
-      )
+      error s!"idx out of range: segment {loc.segIdx} has {seg.data.size} bytes"
 
 /-- Read a `UInt16` at the current location. -/
 @[inline]
-def uint16 : Segment.Decoder UInt16 :=
-  fun seg loc =>
-    if h : loc.idx.val + 1 < seg.data.size then
+def uint16 : Decoder UInt16 :=
+  context "uint16" <| do
+    let seg ← getSeg
+    let loc ← getLoc
+    if h : _ then
       pure (seg.data.ugetUInt16LE loc.idx.toUSize h)
     else
-      throw (.other
-        s!"uint16 out of range: {loc.idx} with segment size {seg.data.size}"
-      )
+      error s!"idx out of range: segment {loc.segIdx} has {seg.data.size} bytes"
 
 /-- Read a `UInt32` at the current location. -/
 @[inline]
-def uint32 : Segment.Decoder UInt32 :=
-  fun seg loc =>
-    if h : loc.idx.val + 3 < seg.data.size then
+def uint32 : Decoder UInt32 :=
+  context "uint32" <| do
+    let seg ← getSeg
+    let loc ← getLoc
+    if h : _ then
       pure (seg.data.ugetUInt32LE loc.idx.toUSize h)
     else
-      throw (.other
-        s!"uint32 out of range: {loc.idx} with segment size {seg.data.size}"
-      )
+      error s!"idx out of range: segment {loc.segIdx} has {seg.data.size} bytes"
 
 /-- Read a `UInt64` at the current location. -/
 @[inline]
-def uint64 : Segment.Decoder UInt64 :=
-  fun seg loc =>
-    if h : loc.idx.val + 7 < seg.data.size then
+def uint64 : Decoder UInt64 :=
+  context "uint64" <| do
+    let seg ← getSeg
+    let loc ← getLoc
+    if h : _ then
       pure (seg.data.ugetUInt64LE loc.idx.toUSize h)
     else
-      throw (.other
-        s!"uint64 out of range: {loc.idx} with segment size {seg.data.size}"
-      )
+      error s!"idx out of range: segment {loc.segIdx} has {seg.data.size} bytes"
 
 /-- Read a `Int8` at the current location. -/
 @[inline]
-def int8 : Segment.Decoder Int8 := do
-  return (← uint8)
+def int8 : Decoder Int8 := do
+  context "int8" <| return (← uint8)
 
 /-- Read a `Int16` at the current location. -/
 @[inline]
-def int16 : Segment.Decoder Int16 := do
-  return (← uint16)
+def int16 : Decoder Int16 := do
+  context "int16" <| return (← uint16)
 
 /-- Read a `Int32` at the current location. -/
 @[inline]
-def int32 : Segment.Decoder Int32 := do
-  return (← uint32)
+def int32 : Decoder Int32 := do
+  context "int32" <| return (← uint32)
 
 /-- Read a `Int64` at the current location. -/
 @[inline]
-def int64 : Segment.Decoder Int64 := do
-  return (← uint64)
+def int64 : Decoder Int64 := do
+  context "int64" <| return (← uint64)
 
 /-- Read a `Float32` at the current location. -/
 @[inline]
-def float32 : Segment.Decoder Float32 := do
-  return (← uint32)
+def float32 : Decoder Float32 := do
+  context "float32" <| return (← uint32)
 
 /-- Read a `Float64` at the current location. -/
 @[inline]
-def float64 : Segment.Decoder Float64 := do
-  return Float64.ofUInt64 (← uint64)
+def float64 : Decoder Float64 := do
+  context "float64" <| return Float64.ofUInt64 (← uint64)
 
 @[inline]
-def anyPointer : Segment.Decoder AnyPointer := do
-  return ⟨← uint64⟩
+def anyPointer : Decoder AnyPointer := do
+  context "anyPointer" <| return ⟨← uint64⟩
 
 @[inline]
-def unparsedValue : Message.Decoder UnparsedValue :=
-  fun msg loc => pure {msg, loc}
+def unparsedValue : Decoder UnparsedValue := do
+  context "unparsedValue" <| return {msg := ← getMsg, loc := ← getLoc}
 
-/-- Move by `x` bytes from current location. -/
+/-- Move by `x` bytes within current segment. -/
 @[inline]
-def moveOffBytes (x : Int32) (d : Segment.Decoder α) : Segment.Decoder α :=
-  fun seg loc => d seg {idx := loc.idx + x}
+def moveOffBytes (x : Int32) (d : Decoder α) : Decoder α :=
+  fun msg loc ctx => d msg {loc with idx := loc.idx + x} ctx
 
 /-- Move by `x` words from current location. -/
 @[inline]
-def moveOffWords (x : Int32) (d : Segment.Decoder α) : Segment.Decoder α :=
-  fun seg loc => d seg {idx := loc.idx + 8 * (show UInt32 from x)}
+def moveOffWords (x : Int32) (d : Decoder α) : Decoder α :=
+  fun msg loc ctx =>
+    d msg {loc with idx := loc.idx + 8 * (show UInt32 from x)} ctx
 
 /-- Move to a different location (potentially another segment). -/
 @[inline]
-def moveLoc (loc : Message.Loc) (d : Message.Decoder α) : Message.Decoder α :=
-  fun msg _ => d msg loc
+def moveLoc (loc : Message.Loc) (d : Decoder α) : Decoder α :=
+  fun msg _ ctx => d msg loc ctx
 
 /--
 Follow a struct pointer.
 -/
 @[inline]
-def structPtr (d : Segment.StructDecoder α)
-      : Message.Decoder (Option α) := do
+def structPtr (d : StructDecoder α) : Decoder (Option α) :=
+  context "structPtr" <| do
   let p : AnyPointer ← anyPointer
+  context s!"{p}" <| do
   if p.isNull then
     return none
 
@@ -395,7 +430,7 @@ def structPtr (d : Segment.StructDecoder α)
         if h : lp.isStruct then
           return ← handleSegPointer {lp with}
         else
-          throw (.other s!"Expected landing pad struct pointer, got {lp.data.toNat.toDigits 16}")
+          error s!"Expected landing pad struct pointer, got {lp}"
       else
         if h : lp.isFar then
           let lp : FarPointer := {lp with}
@@ -403,44 +438,47 @@ def structPtr (d : Segment.StructDecoder α)
           if h : tag.isStruct then
             let tag : StructPointer := {tag with}
             moveLoc lp.toLoc do
-              d.run tag.dataSize tag.pointerSize
+              return some <| ← d.run tag.dataSize tag.pointerSize
           else
-            throw (.other s!"Expected tag struct pointer, got {tag.data.toNat.toDigits 16}")
+            error s!"Expected tag struct pointer, got {tag}"
         else
-          throw (.other s!"Expected landing pad far struct pointer, got {lp.data.toNat.toDigits 16}")
+          error s!"Expected landing pad far struct pointer, got {lp}"
   else
-    throw (.other s!"Expected struct or far pointer, got {p.data.toNat.toDigits 16}")
+    error s!"Expected struct or far pointer, got {p}"
 
 where
   handleSegPointer (p : StructPointer) := do
-    return some (← moveOffWords p.offset <| d.run p.dataSize p.pointerSize)
+    return some (← moveOffWords (p.offset + 1) <| d.run p.dataSize p.pointerSize)
 
 /--
 Follow a list pointer. Provides elemSize tag and listSize in bytes.
 -/
 @[inline]
-private def listPtr (d : UInt8 → UInt32 → Segment.Decoder (Array α)) : Message.Decoder (Array α) := do
+private def listPtr (d : UInt8 → UInt32 → Decoder α) : Decoder (Option α) := do
   let p : AnyPointer ← anyPointer
+  context s!"{p}" <| do
   if p.isNull then
-    return #[]
+    return none
 
   if h : p.isList then
     let p : ListPointer := {p with}
-    d p.elemSize p.size
+    moveOffWords (p.offset + 1) <|
+      d p.elemSize p.size
 
   else if h : p.isFar then
     let p : FarPointer := {p with}
     moveLoc p.toLoc do
       let lp : AnyPointer ← anyPointer
+      context s!"{lp}" <| do
       if !p.landingPadIsFar then
         if lp.isNull then
-          return #[]
+          return none
 
         if h : lp.isList then
           let lp : ListPointer := {lp with}
           d lp.elemSize lp.size
         else
-          throw (.other s!"Expected landing pad list pointer, got {lp.data.toNat.toDigits 16}")
+          error s!"Expected landing pad list pointer, got {lp}"
       else
         if h : lp.isFar then
           let lp : FarPointer := {lp with}
@@ -450,19 +488,19 @@ private def listPtr (d : UInt8 → UInt32 → Segment.Decoder (Array α)) : Mess
             moveLoc lp.toLoc do
               d tag.elemSize tag.size
           else
-            throw (.other s!"Expected tag list pointer, got {tag.data.toNat.toDigits 16}")
+            error s!"Expected tag list pointer, got {tag}"
         else
-          throw (.other s!"Expected landing pad far list pointer, got {lp.data.toNat.toDigits 16}")
+          error s!"Expected landing pad far list pointer, got {lp}"
   else
-    throw (.other s!"list struct or far pointer, got {p.data.toNat.toDigits 16}")
-
+    error s!"list struct or far pointer, got {p}"
 
 
 /-- Decode a list of booleans. -/
-def listBool : Message.Decoder (Array Bool) := do
-  listPtr (fun elemSize size => do
+def listBool : Decoder (Array Bool) :=
+  context "listBool" <| do
+  let res ← listPtr (fun elemSize size => do
     if elemSize ≠ 1 then
-      throw (.other s!"List expected element size 1 (1 bit) but got {elemSize}")
+      error s!"List expected element size 1 (1 bit) but got {elemSize}"
 
     let mut res : Array Bool := Array.mkEmpty size.val
     for i in [0:size.val] do
@@ -472,6 +510,7 @@ def listBool : Message.Decoder (Array Bool) := do
 
     return res
   )
+  return res.getD #[]
 
 
 /-- Decode a list pointer whose elements are primitive/not structs.
@@ -486,17 +525,18 @@ def listBool : Message.Decoder (Array Bool) := do
     6 = 8 bytes (pointer)
     7 = composite
 -/
-def listPtrPrim (elemSize : UInt8) (d : Segment.Decoder α) : Message.Decoder (Array α) := do
+def listPtrPrim (elemSize : UInt8) (d : Decoder α) : Decoder (Array α) :=
+  context "listPtrPrim" <| do
   let byteWidth ← match elemSize with
     | 2 => pure (1 : UInt32)
     | 3 => pure 2
     | 4 => pure 4
     | 5 => pure 8
     | 6 => pure 8
-    | _ => throw (.other s!"List primitive decoder with elemSize = {elemSize}?")
-  listPtr (fun elemSize' size => do
+    | _ => error s!"List primitive decoder with elemSize = {elemSize}?"
+  let res ← listPtr (fun elemSize' size => do
     if elemSize' ≠ elemSize then
-      throw (.other s!"List expected element size {elemSize} but got {elemSize'}")
+      error s!"List expected element size {elemSize} but got {elemSize'}"
 
     let mut res : Array α := Array.mkEmpty size.val
     for i in [0:size.val] do
@@ -505,11 +545,14 @@ def listPtrPrim (elemSize : UInt8) (d : Segment.Decoder α) : Message.Decoder (A
 
     return res
   )
+  return res.getD #[]
 
 /-- Decode a list pointer whose elements are structs. -/
 @[inline]
-def listPtrStruct (d : Segment.StructDecoder α) : Message.Decoder (Array α) := do
-  listPtr (fun elemSize size => do
+def listPtrStruct (d : StructDecoder α) : Decoder (Array α) :=
+  context "listPtrStruct" <| do
+  let res ← listPtr (fun elemSize size =>
+    context "listPtr continuation" <| do
     if elemSize = 7 then
       -- Composite: the first word of the object data is a tag
       let tag ← anyPointer
@@ -519,7 +562,7 @@ def listPtrStruct (d : Segment.StructDecoder α) : Message.Decoder (Array α) :=
         let dataWords := tag.dataSize
         let ptrWords := tag.pointerSize
         if (dataWords.toUInt32 + ptrWords.toUInt32) * numElems ≠ size then
-          throw (.other s!"list ptr struct math not working out: {dataWords}, {ptrWords}, {numElems}, {size}")
+          error s!"list ptr struct math not working out: {dataWords}, {ptrWords}, {numElems}, {size}"
         moveOffWords (1 : UInt32) do
         let mut res : Array α := Array.mkEmpty numElems.val
         for i in [0:numElems.val] do
@@ -528,12 +571,34 @@ def listPtrStruct (d : Segment.StructDecoder α) : Message.Decoder (Array α) :=
           res := res.push a
         return res
       else
-        throw (.other s!"Composite list pointer -- expected struct tag word, got {tag.data.toNat.toDigits 16}")
+        error s!"Composite list pointer -- expected struct tag word, got {tag}"
     else
       -- elemSize is allowed to be 2 (1 byte) thru 6 (8 bytes)
       -- and interpreted as a prefix of the struct
-      throw (.other s!"Not supported: list with elem size tag {elemSize} interpreted as struct")
+      error s!"Not supported: list with elem size tag {elemSize} interpreted as struct"
   )
+  return res.getD #[]
 
+def data : Decoder ByteArray := do
+  let res ← listPtr (fun elemSize elemCount => do
+    if elemSize ≠ 2 then
+      error s!"data pointer has elemSize {elemSize}"
+    let seg ← getSeg
+    let loc ← getLoc
+    return seg.data.copySlice
+      (srcOff := loc.idx.toNat)
+      (dest := ByteArray.empty) (destOff := 0)
+      (len := elemCount.toNat)
+  )
+  return res.getD (ByteArray.empty)
+
+def text : Decoder String := do
+  let bytes ← data
+  match String.fromUTF8? bytes with
+  | none => error "expected text, but bytes are not valid UTF8"
+  | some s => pure s
 
 end Decoder
+
+def decode (f : StructDecoder α) (msg : Message) : Except DecodeError (Option α) :=
+  (Decoder.structPtr f) msg {segIdx := 0, idx := 0} []

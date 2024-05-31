@@ -1,10 +1,14 @@
 
 def Int8 := UInt8
+deriving Inhabited, Repr, DecidableEq
+
 def Int8.ofUInt8 : UInt8 → Int8 := id
 
 def ByteArray.ugetUInt8LE := ByteArray.uget
 
 def Int16 := UInt16
+deriving Inhabited, Repr, DecidableEq
+
 def Int16.ofUInt16 : UInt16 → Int16 := id
 
 def ByteArray.ugetUInt16LE (A : ByteArray) (i : USize)
@@ -25,10 +29,15 @@ def ByteArray.ugetUInt16LE (A : ByteArray) (i : USize)
   return res
 
 def Int32 := UInt32
+deriving Inhabited, Repr, DecidableEq
+
 def Int32.ofUInt32 : UInt32 → Int32 := id
 
+instance : OfNat Int32 n := ⟨(OfNat.ofNat n : UInt32)⟩
 instance : HAdd UInt32 Int32 UInt32 where
   hAdd := fun (x y : UInt32) => x + y
+instance : Add Int32 where
+  add := fun (x y : UInt32) => x + y
 
 def UInt32.shiftArithRight (x y : UInt32) : UInt32 :=
   (x >>> y) ||| (0 - ((x &&& 0x80000000) >>> y))
@@ -71,13 +80,17 @@ def ByteArray.ugetUInt64LE (A : ByteArray) (i : USize)
   return res
 
 def Int64 := UInt64
+deriving Inhabited, Repr, DecidableEq
+
 def Int64.ofUInt64 : UInt64 → Int64 := id
 
 def Float32 := UInt32
+deriving Inhabited, Repr, DecidableEq
+
 def Float32.ofUInt32 : UInt32 → Float32 := id
 
 def Float64 := Float
-deriving Inhabited
+deriving Inhabited, Repr
 
 def Float64.ofUInt64 (x : UInt64) : Float64 :=
   unsafe (unsafeCast x)

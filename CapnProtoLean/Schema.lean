@@ -9,11 +9,11 @@ abbrev Id := UInt64
 
 mutual
 inductive Node.Parameter
-| mk (name : Text)
+| mk (name : String)
 
 inductive Node.NestedNode
 | mk
-  (name : Text)
+  (name : String)
   (id : Id)
 
 inductive Node.Body : Type
@@ -55,7 +55,7 @@ inductive Node.SourceInfo
 inductive Node
 | mk
   (id : Id)
-  (displayName : Text)
+  (displayName : String)
   (displayNamePrefixLength : UInt32)
   (scopeId : Id)
   (parameters : List Node.Parameter)
@@ -79,7 +79,7 @@ inductive Field.Ordinal
 
 inductive Field
 | mk
-  (name : Text)
+  (name : String)
   (codeOrder : UInt16)
   (annotations : List Annotation)
   (discriminantValue : UInt16)
@@ -98,7 +98,7 @@ inductive ElementSize
 
 inductive Enumerant
 | mk
-  (name : Text)
+  (name : String)
   (codeOrder : UInt16)
   (annotations : List Annotation)
 
@@ -109,7 +109,7 @@ inductive Superclass
 
 inductive Method
 | mk
-  (name : Text)
+  (name : String)
   (codeOrder : UInt16)
   (implicitParameters : List Node.Parameter)
   (paramStructType : Id)
@@ -198,7 +198,7 @@ inductive Value.Body
 | uint64 (_ : UInt64)
 | float32 (_ : Float32)
 | float64 (_ : Float64)
-| text (_ : Text)
+| text (_ : String)
 | data (_ : ByteArray)
 | list (_ : AnyPointer)
 | enum (_ : UInt16)
@@ -218,6 +218,7 @@ inductive Annotation
 
 end
 
+deriving instance Repr for Node, Node.SourceInfo
 
 structure CapnpVersion where
   major : UInt16
@@ -234,19 +235,75 @@ end CapnpVersion
 inductive CodeGeneratorRequest.RequestedFile.Import
 | mk
   (id : Id)
-  (name : Text)
+  (name : String)
+deriving Repr
 
 inductive CodeGeneratorRequest.RequestedFile
 | mk
   (id : Id)
-  (filename : Text)
-  (imports : List CodeGeneratorRequest.RequestedFile.Import)
+  (filename : String)
+  (imports : Array CodeGeneratorRequest.RequestedFile.Import)
+deriving Repr
 
 structure CodeGeneratorRequest where
-  capnpVersion : CapnpVersion
-  nodes : List Node
-  sourceInfo : List Node.SourceInfo
-  requestedFiles : List CodeGeneratorRequest.RequestedFile
+  capnpVersion : Option CapnpVersion
+  nodes : Array Node
+  sourceInfo : Array Node.SourceInfo
+  requestedFiles : Array CodeGeneratorRequest.RequestedFile
+deriving Repr
 
-def CodeGeneratorRequest.decoder : Segment.Decoder CodeGeneratorRequest := do
-  sorry
+
+open Decoder
+
+mutual
+def CapnpVersion.decoder : StructDecoder CapnpVersion :=
+  fun dataWords ptrWords =>
+  context "capnpversion" do
+  if dataWords ≠ 1 then
+    error s!"CapnpVersion: dataWords: {dataWords}"
+  if ptrWords ≠ 0 then
+    error s!"CapnpVersion: ptrWords: {ptrWords}"
+  let major ← context "data[0]" <| moveOffBytes 0 <| uint16
+  let minor ← context "data[2]" <| moveOffBytes 2 <| uint8
+  let micro ← context "data[3]" <| moveOffBytes 3 <| uint8
+  return {major,minor,micro}
+
+def CodeGeneratorRequest.RequestedFile.Import.decoder
+    : StructDecoder CodeGeneratorRequest.RequestedFile.Import :=
+  fun dataWords ptrWords =>
+  context "codegeneratorrequest.RequestedFile.Import" do
+  if dataWords ≠ 1 then
+    error s!"dataWords: {dataWords}"
+  if ptrWords ≠ 1 then
+    error s!"ptrWords: {ptrWords}"
+  let id ← context "data[0]" <| moveOffBytes 0 <| uint64
+  let name ← context "ptr[0]" <| moveOffWords (1 + 0) <| text
+  return .mk (id := id) (name := name)
+
+def CodeGeneratorRequest.RequestedFile.decoder : StructDecoder CodeGeneratorRequest.RequestedFile :=
+  fun dataWords ptrWords =>
+  context "codegeneratorrequest.RequestedFile" do
+  if dataWords ≠ 1 then
+    error s!"dataWords: {dataWords}"
+  if ptrWords ≠ 2 then
+    error s!"ptrWords: {ptrWords}"
+  let id ← context "data[0]" <| moveOffBytes 0 <| uint64
+  let filename ← context "ptr[0]" <| moveOffWords (1 + 0) <| text
+  let imports ← context "ptr[1]" <| moveOffWords (1 + 1) <|
+    listPtrStruct CodeGeneratorRequest.RequestedFile.Import.decoder
+  return .mk (id := id) (filename := filename) (imports := imports)
+
+def CodeGeneratorRequest.decoder : StructDecoder CodeGeneratorRequest :=
+  fun dataWords ptrWords =>
+  context "codegeneratorrequest" do
+  if dataWords ≠ 0 then
+    error s!"CodeGenReq: dataWords: {dataWords}"
+  if ptrWords ≠ 4 then
+    error s!"CodeGenReq: ptrWords: {ptrWords}"
+  let capnpVersion ← context "ptr[2]" <| moveOffWords 2 <| structPtr CapnpVersion.decoder
+  let nodes := #[]
+  let sourceInfo := #[]
+  let requestedFiles ← context "ptr[1]" <| moveOffWords (0 + 1) <|
+    listPtrStruct CodeGeneratorRequest.RequestedFile.decoder
+  return {capnpVersion,nodes,sourceInfo,requestedFiles}
+end
