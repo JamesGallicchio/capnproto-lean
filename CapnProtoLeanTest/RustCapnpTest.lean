@@ -42,7 +42,3 @@ end
       throw (.userError s!"decode error: {e}")
   IO.println (repr obj)
   return ()
-
--- generate_capnproto #[
---   "CapnProtoLeanTest/rust_capnp_test/schema.capnp"
--- ]

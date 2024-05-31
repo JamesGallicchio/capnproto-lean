@@ -9,10 +9,11 @@ fn main() -> Result<(), capnp::Error> {
     b.set_bar(&[1,2,3,4,5,6,7,8,9,10])?;
     let mut elems = b.init_zing(2);
     for i in 0..2 {
-        elems.reborrow().get(i).set_foo(16 * (1 + (i as u64)) + 1);
+        let mut b = elems.reborrow().get(i);
+        b.set_foo(16 * (1 + (i as u64)) + 1);
+        b.set_bar(&[1000,2000,3000])?;
     }
 
-    //let r = message.into_reader();
     capnp::serialize::write_message(
         std::io::stdout(),
         &message)?;
