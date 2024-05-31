@@ -11,6 +11,7 @@
           bashInteractive
           elan
           capnproto
+          rustup
         ];
       };
     });
