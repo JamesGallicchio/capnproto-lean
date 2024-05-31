@@ -18,10 +18,12 @@ deriving Inhabited, Repr
 structure Segment.Loc where
   /-- Index within a segment, in *bytes* -/
   idx : UInt32
+deriving Inhabited
 
 structure Message.Loc extends Segment.Loc where
   /-- Index of segment in message -/
   segIdx : UInt32
+deriving Inhabited
 
 instance : ToString Message.Loc where
   toString := fun {segIdx, idx} =>
@@ -205,12 +207,14 @@ def Text := Data
 deriving Inhabited
 
 def DecodeCtx := List (String × Message.Loc)
+deriving Inhabited
 
 structure DecodeError where
   msg : Message
   context : DecodeCtx
   error : String
   loc : Message.Loc
+deriving Inhabited
 
 namespace DecodeError
 instance : ToString DecodeError where
@@ -226,6 +230,10 @@ def Decoder := ReaderT Message <| ReaderT Message.Loc <| ReaderT DecodeCtx <| Ex
 deriving Monad, MonadExcept
 
 def StructDecoder (α : Type) := (dataWords ptrWords : UInt16) → Decoder α
+
+instance StructDecoder.instInhabited : Inhabited (StructDecoder α) where
+  default := fun _ _ _ _ _ => .error default
+
 def StructDecoder.run (dataWords ptrWords : UInt16) (d : StructDecoder α) : Decoder α :=
   d dataWords ptrWords
 
