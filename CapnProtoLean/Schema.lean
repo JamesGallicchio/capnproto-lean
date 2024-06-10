@@ -21,33 +21,33 @@ inductive Node.Body : Type
 | struct
   (dataWordCount : UInt16)
   (pointerCount : UInt16)
-  (preferredListEncoding : ElementSize)
+  (preferredArrayEncoding : ElementSize)
   (isGroup : Bool)
   (discriminantCount : UInt16)
   (discriminantOffset : UInt32)
-  (fields : List Field)
+  (fields : Array Field)
 | enum
-  (enumerants : List Enumerant)
+  (enumerants : Array Enumerant)
 | interface
-  (methods : List Method)
-  (superclasses : List Superclass)
+  (methods : Array Method)
+  (superclasses : Array Superclass)
 | const
   (type : «Type»)
   (value : Value)
 | annotation
   (type : «Type»)
-  (targetsFile : «Type»)
-  (targetsConst : «Type»)
-  (targetsEnum : «Type»)
-  (targetsEnumerant : «Type»)
-  (targetsStruct : «Type»)
-  (targetsField : «Type»)
-  (targetsUnion : «Type»)
-  (targetsGroup : «Type»)
-  (targetsInterface : «Type»)
-  (targetsMethod : «Type»)
-  (targetsParam : «Type»)
-  (targetsAnnotation : «Type»)
+  (targetsFile       : Bool)
+  (targetsConst      : Bool)
+  (targetsEnum       : Bool)
+  (targetsEnumerant  : Bool)
+  (targetsStruct     : Bool)
+  (targetsField      : Bool)
+  (targetsUnion      : Bool)
+  (targetsGroup      : Bool)
+  (targetsInterface  : Bool)
+  (targetsMethod     : Bool)
+  (targetsParam      : Bool)
+  (targetsAnnotation : Bool)
 
 inductive Node.SourceInfo
 | mk
@@ -58,10 +58,10 @@ inductive Node
   (displayName : String)
   (displayNamePrefixLength : UInt32)
   (scopeId : Id)
-  (parameters : List Node.Parameter)
+  (parameters : Array Node.Parameter)
   (isGeneric : Bool)
-  (nestedNodes : List Node.NestedNode)
-  (annotations : List Annotation)
+  (nestedNodes : Array Node.NestedNode)
+  (annotations : Array Annotation)
   (body : Node.Body)
 
 inductive Field.Body
@@ -81,7 +81,7 @@ inductive Field
 | mk
   (name : String)
   (codeOrder : UInt16)
-  (annotations : List Annotation)
+  (annotations : Array Annotation)
   (discriminantValue : UInt16)
   (body : Field.Body)
   (ordinal : Field.Ordinal)
@@ -100,7 +100,7 @@ inductive Enumerant
 | mk
   (name : String)
   (codeOrder : UInt16)
-  (annotations : List Annotation)
+  (annotations : Array Annotation)
 
 inductive Superclass
 | mk
@@ -111,12 +111,12 @@ inductive Method
 | mk
   (name : String)
   (codeOrder : UInt16)
-  (implicitParameters : List Node.Parameter)
+  (implicitParameters : Array Node.Parameter)
   (paramStructType : Id)
   (paramBrand : Brand)
   (resultStructType : Id)
   (resultBrand : Brand)
-  (annotations : List Annotation)
+  (annotations : Array Annotation)
 
 inductive «Type».Body.AnyPointer.Unconstrained
 | anyKind
@@ -165,7 +165,7 @@ inductive «Type»
   (body : «Type».Body)
 
 inductive Brand.Scope.Body
-| bind (l : List Brand.Binding)
+| bind (l : Array Brand.Binding)
 | inherit
 
 inductive Brand.Scope
@@ -183,7 +183,7 @@ inductive Brand.Binding
 
 inductive Brand
 | mk
-  (scopes : List Brand.Scope)
+  (scopes : Array Brand.Scope)
 
 inductive Value.Body
 | void (_ : Unit)
