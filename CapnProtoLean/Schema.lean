@@ -62,7 +62,7 @@ inductive Node
   (isGeneric : Bool)
   (nestedNodes : List Node.NestedNode)
   (annotations : List Annotation)
-  (body : Body)
+  (body : Node.Body)
 
 inductive Field.Body
 | slot
@@ -162,7 +162,7 @@ inductive «Type».Body
 
 inductive «Type»
 | mk
-  (body : Body)
+  (body : «Type».Body)
 
 inductive Brand.Scope.Body
 | bind (l : List Brand.Binding)
