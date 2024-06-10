@@ -2,6 +2,6 @@ import CapnProtoLean
 
 namespace CapnProtoLean
 
-generate_capnproto #[
+#generate_capnproto #[
   "CapnProtoLeanTest/reflect/schema.capnp"
 ]

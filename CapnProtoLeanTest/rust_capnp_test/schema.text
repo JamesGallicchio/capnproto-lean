@@ -1,0 +1,226 @@
+( nodes = [
+    ( id = 17973010740377189878,
+      displayName = "schema.capnp",
+      displayNamePrefixLength = 7,
+      scopeId = 0,
+      nestedNodes = [
+        ( name = "Test",
+          id = 17321779288571250033 ),
+        ( name = "Request",
+          id = 11025885811572425229 ),
+        (name = "Expr", id = 9503309125958469825) ],
+      file = void,
+      isGeneric = false ),
+    ( id = 17321779288571250033,
+      displayName = "schema.capnp:Test",
+      displayNamePrefixLength = 13,
+      scopeId = 17973010740377189878,
+      nestedNodes = [],
+      struct = (
+        dataWordCount = 1,
+        pointerCount = 2,
+        preferredListEncoding = inlineComposite,
+        isGroup = false,
+        discriminantCount = 0,
+        discriminantOffset = 0,
+        fields = [
+          ( name = "foo",
+            codeOrder = 0,
+            discriminantValue = 65535,
+            slot = (
+              offset = 0,
+              type = (uint64 = void),
+              defaultValue = (uint64 = 0),
+              hadExplicitDefault = false ),
+            ordinal = (explicit = 0) ),
+          ( name = "bar",
+            codeOrder = 1,
+            discriminantValue = 65535,
+            slot = (
+              offset = 0,
+              type = (
+                list = (
+                  elementType = (uint64 = void) ) ),
+              defaultValue = (list = <opaque pointer>),
+              hadExplicitDefault = false ),
+            ordinal = (explicit = 1) ),
+          ( name = "zing",
+            codeOrder = 2,
+            discriminantValue = 65535,
+            slot = (
+              offset = 1,
+              type = (
+                list = (
+                  elementType = (
+                    struct = (
+                      typeId = 17321779288571250033 ) ) ) ),
+              defaultValue = (list = <opaque pointer>),
+              hadExplicitDefault = false ),
+            ordinal = (explicit = 2) ) ] ),
+      isGeneric = false ),
+    ( id = 9503309125958469825,
+      displayName = "schema.capnp:Expr",
+      displayNamePrefixLength = 13,
+      scopeId = 17973010740377189878,
+      nestedNodes = [],
+      struct = (
+        dataWordCount = 1,
+        pointerCount = 2,
+        preferredListEncoding = inlineComposite,
+        isGroup = false,
+        discriminantCount = 3,
+        discriminantOffset = 0,
+        fields = [
+          ( name = "var",
+            codeOrder = 0,
+            discriminantValue = 0,
+            group = (
+              typeId = 13747609657811166357 ),
+            ordinal = (implicit = void) ),
+          ( name = "const",
+            codeOrder = 1,
+            discriminantValue = 1,
+            group = (
+              typeId = 12285316530248678394 ),
+            ordinal = (implicit = void) ),
+          ( name = "binary",
+            codeOrder = 2,
+            discriminantValue = 2,
+            group = (
+              typeId = 12893031835390571753 ),
+            ordinal = (implicit = void) ) ] ),
+      isGeneric = false ),
+    ( id = 11025885811572425229,
+      displayName = "schema.capnp:Request",
+      displayNamePrefixLength = 13,
+      scopeId = 17973010740377189878,
+      nestedNodes = [],
+      struct = (
+        dataWordCount = 0,
+        pointerCount = 2,
+        preferredListEncoding = inlineComposite,
+        isGroup = false,
+        discriminantCount = 0,
+        discriminantOffset = 0,
+        fields = [
+          ( name = "name",
+            codeOrder = 0,
+            discriminantValue = 65535,
+            slot = (
+              offset = 0,
+              type = (text = void),
+              defaultValue = (text = ""),
+              hadExplicitDefault = false ),
+            ordinal = (explicit = 0) ),
+          ( name = "expr",
+            codeOrder = 1,
+            discriminantValue = 65535,
+            slot = (
+              offset = 1,
+              type = (
+                struct = (
+                  typeId = 9503309125958469825 ) ),
+              defaultValue = (
+                struct = <opaque pointer> ),
+              hadExplicitDefault = false ),
+            ordinal = (explicit = 1) ) ] ),
+      isGeneric = false ),
+    ( id = 13747609657811166357,
+      displayName = "schema.capnp:Expr.var",
+      displayNamePrefixLength = 18,
+      scopeId = 9503309125958469825,
+      struct = (
+        dataWordCount = 1,
+        pointerCount = 2,
+        preferredListEncoding = inlineComposite,
+        isGroup = true,
+        discriminantCount = 0,
+        discriminantOffset = 0,
+        fields = [
+          ( name = "name",
+            codeOrder = 0,
+            discriminantValue = 65535,
+            slot = (
+              offset = 0,
+              type = (text = void),
+              defaultValue = (text = ""),
+              hadExplicitDefault = false ),
+            ordinal = (explicit = 0) ) ] ),
+      isGeneric = false ),
+    ( id = 12285316530248678394,
+      displayName = "schema.capnp:Expr.const",
+      displayNamePrefixLength = 18,
+      scopeId = 9503309125958469825,
+      struct = (
+        dataWordCount = 1,
+        pointerCount = 2,
+        preferredListEncoding = inlineComposite,
+        isGroup = true,
+        discriminantCount = 0,
+        discriminantOffset = 0,
+        fields = [
+          ( name = "value",
+            codeOrder = 0,
+            discriminantValue = 65535,
+            slot = (
+              offset = 0,
+              type = (text = void),
+              defaultValue = (text = ""),
+              hadExplicitDefault = false ),
+            ordinal = (explicit = 1) ) ] ),
+      isGeneric = false ),
+    ( id = 12893031835390571753,
+      displayName = "schema.capnp:Expr.binary",
+      displayNamePrefixLength = 18,
+      scopeId = 9503309125958469825,
+      struct = (
+        dataWordCount = 1,
+        pointerCount = 2,
+        preferredListEncoding = inlineComposite,
+        isGroup = true,
+        discriminantCount = 0,
+        discriminantOffset = 0,
+        fields = [
+          ( name = "lhs",
+            codeOrder = 0,
+            discriminantValue = 65535,
+            slot = (
+              offset = 0,
+              type = (
+                struct = (
+                  typeId = 9503309125958469825 ) ),
+              defaultValue = (
+                struct = <opaque pointer> ),
+              hadExplicitDefault = false ),
+            ordinal = (explicit = 2) ),
+          ( name = "rhs",
+            codeOrder = 1,
+            discriminantValue = 65535,
+            slot = (
+              offset = 1,
+              type = (
+                struct = (
+                  typeId = 9503309125958469825 ) ),
+              defaultValue = (
+                struct = <opaque pointer> ),
+              hadExplicitDefault = false ),
+            ordinal = (explicit = 3) ) ] ),
+      isGeneric = false ) ],
+  requestedFiles = [
+    ( id = 17973010740377189878,
+      filename = "schema.capnp",
+      imports = [] ) ],
+  capnpVersion = (major = 1, minor = 0, micro = 2),
+  sourceInfo = [
+    ( id = 11025885811572425229,
+      members = [(), ()] ),
+    ( id = 12893031835390571753,
+      members = [(), ()] ),
+    ( id = 12285316530248678394,
+      members = [()] ),
+    ( id = 13747609657811166357,
+      members = [()] ),
+    (id = 9503309125958469825, members = [(), (), ()]),
+    ( id = 17321779288571250033,
+      members = [(), (), ()] ),
+    ( id = 17973010740377189878 ) ] )
