@@ -15,23 +15,119 @@ structure Message where
   segments : Array Segment
 deriving Inhabited, Repr
 
-structure Segment.Loc where
+namespace Message
+
+structure Loc where
+  /-- Index of segment in message -/
+  segIdx : UInt32
   /-- Index within a segment, in *bytes* -/
   idx : UInt32
 deriving Inhabited
 
-structure Message.Loc extends Segment.Loc where
-  /-- Index of segment in message -/
-  segIdx : UInt32
-deriving Inhabited
+namespace Loc
 
-instance : ToString Message.Loc where
+def plusBytes (w : UInt32) (l : Loc) : Loc := {
+  segIdx := l.segIdx
+  idx := l.idx + w
+}
+
+def plusWords (w : UInt32) (l : Loc) : Loc := {
+  segIdx := l.segIdx
+  idx := l.idx + 8 * w
+}
+
+instance : ToString Loc where
   toString := fun {segIdx, idx} =>
     s!"{segIdx}:{idx}"
 
-structure UnparsedValue where
-  msg : Message
-  loc : Message.Loc
+end Loc
+
+/-- Read a `Message` in by repeatedly reading from a handle `h` -/
+partial def fromHandle (h : IO.FS.Handle) : IO Message := do
+  -- Number of segments is the first UInt32 of the stream, plus 1
+  let sizeSegs ← try (do
+    let numSegs := (← readUInt32) + 1
+    let mut sizeSegs := #[]
+    for _ in [0:numSegs.val] do
+      sizeSegs := sizeSegs.push (← readUInt32)
+    if (4 + numSegs*4) % 8 = 4 then
+      let _ ← readUInt32
+    return sizeSegs)
+    catch _ => throw (.userError "Failed to parse message header")
+  let segs : Array Segment ← sizeSegs.mapM (fun size =>
+    return {data := ← readBytesExact (8 * size.toUSize)}
+  )
+  return {segments := segs}
+where
+  readUInt32 : IO UInt32 := do
+    let bytes ← readBytesExact 4
+    if h : bytes.size = 4 then
+      return bytes.ugetUInt32LE 0 (by rw [h]; decide)
+    throw (.userError s!"readBytesExact: expected 4 bytes, got {bytes.size}")
+  readBytesExact (size : USize) : IO ByteArray := do
+    readBytesExactAux size (ByteArray.mkEmpty size.val)
+  readBytesExactAux (size : USize) (acc : ByteArray) : IO ByteArray := do
+    if size = 0 then
+      return acc
+    let new ← h.read size
+    let newLen := new.size.toUSize
+    if newLen = 0 then
+      throw (.userError s!"readBytesExact: reached EOF")
+    let acc := acc ++ new
+    readBytesExactAux (size - newLen) acc
+
+inductive OutOfBounds
+  | seg (loc : Message.Loc) (segs : Nat)
+  | idx (loc : Message.Loc) (len : Nat) (segLen : Nat)
+
+variable (m : Message) (l : Loc) in
+section
+
+@[inline]
+def getUInt8 : Except OutOfBounds UInt8 := do
+  if h : _ then
+    let seg := m.segments.uget l.segIdx.toUSize h
+    if h : _ then
+      return seg.data.uget l.idx.toUSize h
+    else
+      throw <| OutOfBounds.idx l 1 seg.data.size
+  else
+    throw <| OutOfBounds.seg l m.segments.size
+
+@[inline]
+def getUInt16 : Except OutOfBounds UInt16 := do
+  if h : _ then
+    let seg := m.segments.uget l.segIdx.toUSize h
+    if h : _ then
+      return seg.data.ugetUInt16LE l.idx.toUSize h
+    else
+      throw <| OutOfBounds.idx l 1 seg.data.size
+  else
+    throw <| OutOfBounds.seg l m.segments.size
+
+@[inline]
+def getUInt32 : Except OutOfBounds UInt32 := do
+  if h : _ then
+    let seg := m.segments.uget l.segIdx.toUSize h
+    if h : _ then
+      return seg.data.ugetUInt32LE l.idx.toUSize h
+    else
+      throw <| OutOfBounds.idx l 1 seg.data.size
+  else
+    throw <| OutOfBounds.seg l m.segments.size
+
+def getUInt64 : Except OutOfBounds UInt64 := do
+  if h : _ then
+    let seg := m.segments.uget l.segIdx.toUSize h
+    if h : _ then
+      return seg.data.ugetUInt64LE l.idx.toUSize h
+    else
+      throw <| OutOfBounds.idx l 1 seg.data.size
+  else
+    throw <| OutOfBounds.seg l m.segments.size
+end
+
+end Message
 
 structure AnyPointer where
   data : UInt64
@@ -193,420 +289,498 @@ namespace OtherPointer
 instance : Inhabited OtherPointer := ⟨⟨⟨3⟩, by decide⟩⟩
 end OtherPointer
 
-structure Data extends ListPointer where
+structure DataPointer extends ListPointer where
   h : toListPointer.elemSize = 2 := by first | decide | simp_all
 
-namespace Data
-instance : Inhabited Data where
+namespace DataPointer
+instance : Inhabited DataPointer where
   default := {
     data := 0x200000001
   }
-end Data
+end DataPointer
 
-def Text := Data
-deriving Inhabited
+/-- CapnProto specific meaning here.
+Default value should be the same as a value where everything is zero. -/
+class HasDefault (α : Type) where
+  default : α
 
-def DecodeCtx := List (String × Message.Loc)
-deriving Inhabited
+namespace HasDefault
+instance : HasDefault Bool := ⟨false⟩
+instance : HasDefault UInt8  := ⟨0⟩
+instance : HasDefault UInt16 := ⟨0⟩
+instance : HasDefault UInt32 := ⟨0⟩
+instance : HasDefault UInt64 := ⟨0⟩
+instance : HasDefault Int8  := ⟨show UInt8 from 0⟩
+instance : HasDefault Int16 := ⟨show UInt16 from 0⟩
+instance : HasDefault Int32 := ⟨show UInt32 from 0⟩
+instance : HasDefault Int64 := ⟨show UInt64 from 0⟩
+instance : HasDefault AnyPointer := ⟨⟨show UInt64 from 0⟩⟩
+end HasDefault
 
-structure DecodeError where
-  msg : Message
-  context : DecodeCtx
-  error : String
-  loc : Message.Loc
-deriving Inhabited
+structure Struct where
+  start : Message.Loc
+  (dataWords ptrWords : UInt16)
 
-namespace DecodeError
-instance : ToString DecodeError where
-  toString err :=
-    match err with
-    | {msg:=_, context, error, loc} =>
-      s!"{loc} {error}\n" ++ (
-        context.map (fun (name, loc) => s!"{loc} {name}\n")
-        |> String.join)
-end DecodeError
+namespace Struct
 
-def Decoder := ReaderT Message <| ReaderT Message.Loc <| ReaderT DecodeCtx <| Except DecodeError
-deriving Monad, MonadExcept
-
-def StructDecoder (α : Type) := (dataWords ptrWords : UInt16) → Decoder α
-
-instance StructDecoder.instInhabited : Inhabited (StructDecoder α) where
-  default := fun _ _ _ _ _ => .error default
-
-def StructDecoder.run (dataWords ptrWords : UInt16) (d : StructDecoder α) : Decoder α :=
-  d dataWords ptrWords
-
-
-namespace Message
-
-partial def fromHandle (h : IO.FS.Handle) : IO Message := do
-  -- Number of segments is the first UInt32 of the stream, plus 1
-  let sizeSegs ← try (do
-    let numSegs := (← readUInt32) + 1
-    let mut sizeSegs := #[]
-    for _ in [0:numSegs.val] do
-      sizeSegs := sizeSegs.push (← readUInt32)
-    if (4 + numSegs*4) % 8 = 4 then
-      let _ ← readUInt32
-    return sizeSegs)
-    catch _ => throw (.userError "Failed to parse message header")
-  let segs : Array Segment ← sizeSegs.mapM (fun size =>
-    return {data := ← readBytesExact (8 * size.toUSize)}
-  )
-  return {segments := segs}
-where
-  readUInt32 : IO UInt32 := do
-    let bytes ← readBytesExact 4
-    if h : bytes.size = 4 then
-      return bytes.ugetUInt32LE 0 (by rw [h]; decide)
-    throw (.userError s!"readBytesExact: expected 4 bytes, got {bytes.size}")
-  readBytesExact (size : USize) : IO ByteArray := do
-    readBytesExactAux size (ByteArray.mkEmpty size.val)
-  readBytesExactAux (size : USize) (acc : ByteArray) : IO ByteArray := do
-    if size = 0 then
-      return acc
-    let new ← h.read size
-    let newLen := new.size.toUSize
-    if newLen = 0 then
-      throw (.userError s!"readBytesExact: reached EOF")
-    let acc := acc ++ new
-    readBytesExactAux (size - newLen) acc
-
-end Message
-
-namespace Decoder
-
-/-- Report an error, with context -/
-def error (s : String) : Decoder α :=
-  fun msg loc context => do
-  throw {
-    msg, context, loc, error := s
+instance : HasDefault Struct where
+  default := {
+    start := default
+    dataWords := 0
+    ptrWords := 0
   }
 
-@[inline]
-def context (name : String) (d : Decoder α) : Decoder α :=
-  fun msg loc context => d msg loc ((name, loc) :: context)
 
-@[inline]
-def getMsg : Decoder Message := fun msg _ _ => pure msg
+abbrev ReadM := ReaderT Message <| Except Message.OutOfBounds
 
-@[inline]
-def getLoc : Decoder Message.Loc := fun _ loc _ => pure loc
+variable (self : Struct)
 
+/-- Read a `Bool` at `offset` bytes into the struct's data section. -/
 @[inline]
-def getSeg : Decoder Segment := do
-  let msg ← getMsg
-  let loc ← getLoc
-  if h : _ then
-    return msg.segments.uget loc.segIdx.toUSize h
+def bool (offset : UInt32) (bit : UInt8) : ReadM Bool := do
+  if offset < 8 * self.dataWords.toUInt32 then
+    let byte ← (← read).getUInt8 (self.start.plusBytes offset)
+    return (byte >>> bit) &&& 0b1 = 0b1
   else
-    error s!"segment idx out of range (message has {msg.segments.size} segments)"
+    return HasDefault.default
 
-/-- Read a `Bool` at the current location. -/
+/-- Read a `UInt8` at `offset` bytes into the struct's data section. -/
 @[inline]
-def bool (bit : UInt8) : Decoder Bool :=
-  context "bool" <| do
-    let seg ← getSeg
-    let loc ← getLoc
-    if h : _ then
-      let byte := seg.data.uget loc.idx.toUSize h
-      pure <| (byte >>> bit) &&& 0b1 = 0b1
-    else
-      error s!"idx out of range: segment {loc.segIdx} has {seg.data.size} bytes"
+def uint8 (offset : UInt32) : ReadM UInt8 := do
+  if offset < 8 * self.dataWords.toUInt32 then
+    (← read).getUInt8 (self.start.plusBytes offset)
+  else
+    return HasDefault.default
 
-/-- Read a `UInt8` at the current location. -/
+/-- Read a `UInt16` at `offset` bytes into the struct's data section. -/
 @[inline]
-def uint8 : Decoder UInt8 :=
-  context "uint8" <| do
-    let seg ← getSeg
-    let loc ← getLoc
-    if h : _ then
-      pure (seg.data.uget loc.idx.toUSize h)
-    else
-      error s!"idx out of range: segment {loc.segIdx} has {seg.data.size} bytes"
+def uint16 (offset : UInt32) : ReadM UInt16 := do
+  if offset < 8 * self.dataWords.toUInt32 then
+    (← read).getUInt16 (self.start.plusBytes offset)
+  else
+    return HasDefault.default
 
-/-- Read a `UInt16` at the current location. -/
+/-- Read a `UInt32` at `offset` bytes into the struct's data section. -/
 @[inline]
-def uint16 : Decoder UInt16 :=
-  context "uint16" <| do
-    let seg ← getSeg
-    let loc ← getLoc
-    if h : _ then
-      pure (seg.data.ugetUInt16LE loc.idx.toUSize h)
-    else
-      error s!"idx out of range: segment {loc.segIdx} has {seg.data.size} bytes"
+def uint32 (offset : UInt32) : ReadM UInt32 := do
+  if offset < 8 * self.dataWords.toUInt32 then
+    (← read).getUInt32 (self.start.plusBytes offset)
+  else
+    return HasDefault.default
 
-/-- Read a `UInt32` at the current location. -/
+/-- Read a `UInt64` at `offset` bytes into the struct's data section. -/
 @[inline]
-def uint32 : Decoder UInt32 :=
-  context "uint32" <| do
-    let seg ← getSeg
-    let loc ← getLoc
-    if h : _ then
-      pure (seg.data.ugetUInt32LE loc.idx.toUSize h)
-    else
-      error s!"idx out of range: segment {loc.segIdx} has {seg.data.size} bytes"
+def uint64 (offset : UInt32) : ReadM UInt64 := do
+  if offset < 8 * self.dataWords.toUInt32 then
+    (← read).getUInt64 (self.start.plusBytes offset)
+  else
+    return HasDefault.default
 
-/-- Read a `UInt64` at the current location. -/
+/-- Read a `Int8` at `offset` bytes into the struct's data section. -/
 @[inline]
-def uint64 : Decoder UInt64 :=
-  context "uint64" <| do
-    let seg ← getSeg
-    let loc ← getLoc
-    if h : _ then
-      pure (seg.data.ugetUInt64LE loc.idx.toUSize h)
-    else
-      error s!"idx out of range: segment {loc.segIdx} has {seg.data.size} bytes"
+def int8 (offset : UInt32) : ReadM Int8 := do
+  return (← self.uint8 offset)
 
-/-- Read a `Int8` at the current location. -/
+/-- Read a `Int16` at `offset` bytes into the struct's data section. -/
 @[inline]
-def int8 : Decoder Int8 := do
-  context "int8" <| return (← uint8)
+def int16 (offset : UInt32) : ReadM Int16 := do
+  return (← self.uint16 offset)
 
-/-- Read a `Int16` at the current location. -/
+/-- Read a `Int32` at `offset` bytes into the struct's data section. -/
 @[inline]
-def int16 : Decoder Int16 := do
-  context "int16" <| return (← uint16)
+def int32 (offset : UInt32) : ReadM Int32 := do
+  return (← self.uint32 offset)
 
-/-- Read a `Int32` at the current location. -/
+/-- Read a `Int64` at `offset` bytes into the struct's data section. -/
 @[inline]
-def int32 : Decoder Int32 := do
-  context "int32" <| return (← uint32)
+def int64 (offset : UInt32) : ReadM Int64 := do
+  return (← self.uint64 offset)
 
-/-- Read a `Int64` at the current location. -/
+/-- Read a `Float32` at `offset` bytes into the struct's data section. -/
 @[inline]
-def int64 : Decoder Int64 := do
-  context "int64" <| return (← uint64)
+def float32 (offset : UInt32) : ReadM Float32 := do
+  return (← self.uint32 offset)
 
-/-- Read a `Float32` at the current location. -/
+/-- Read a `Float64` at `offset` bytes into the struct's data section. -/
 @[inline]
-def float32 : Decoder Float32 := do
-  context "float32" <| return (← uint32)
+def float64 (offset : UInt32) : ReadM Float64 := do
+  return Float64.ofUInt64 (← self.uint64 offset)
 
-/-- Read a `Float64` at the current location. -/
+/-- Read a pointer at `offset` *words* into the struct's pointer section. -/
 @[inline]
-def float64 : Decoder Float64 := do
-  context "float64" <| return Float64.ofUInt64 (← uint64)
+def anyPointer (offset : UInt16) : ReadM AnyPointer := do
+  if offset < self.ptrWords then
+    return ⟨← (← read).getUInt64 (self.start.plusWords (self.dataWords + offset).toUInt32)⟩
+  else
+    return HasDefault.default
+
+end Struct
+
+structure List where
+  start : Message.Loc
+  elemSize : UInt8
+  hElemSize : elemSize < 8
+  dataSize : UInt32
+  tag? : if elemSize = 7 then StructPointer else Unit
+
+namespace List
+
+instance : HasDefault List where
+  default := {
+    start := default
+    elemSize := 0
+    hElemSize := by decide
+    dataSize := 0
+    tag? := ()
+  }
+
+variable (self : List)
 
 @[inline]
-def anyPointer : Decoder AnyPointer := do
-  context "anyPointer" <| return ⟨← uint64⟩
+def elemCt : UInt32 :=
+  if h : self.elemSize = 7 then
+    (show StructPointer by simpa [h] using self.tag?).offset
+  else
+    self.dataSize
+
+/-- Element width, in *bytes* -/
+@[inline]
+def elemWidth : UInt32 :=
+  match self with
+  | {elemSize := ⟨⟨0,_⟩⟩, ..} => 0
+  | {elemSize := ⟨⟨1,_⟩⟩, ..}
+  | {elemSize := ⟨⟨2,_⟩⟩, ..} => 1
+  | {elemSize := ⟨⟨3,_⟩⟩, ..} => 2
+  | {elemSize := ⟨⟨4,_⟩⟩, ..} => 4
+  | {elemSize := ⟨⟨5,_⟩⟩, ..}
+  | {elemSize := ⟨⟨6,_⟩⟩, ..} => 8
+  | {elemSize := ⟨⟨7,_⟩⟩, tag?, ..} =>
+    let sp : StructPointer := tag?
+    8 * (sp.dataSize + sp.pointerSize).toUInt32
+  | {elemSize := ⟨⟨n+8,_⟩⟩, ..} =>
+    by contradiction
+
+structure OutOfBounds where
+  (elemCt idx : UInt32)
 
 @[inline]
-def unparsedValue : Decoder UnparsedValue := do
-  context "unparsedValue" <| return {msg := ← getMsg, loc := ← getLoc}
+def getLocOfIdx (i : UInt32) : Except OutOfBounds Message.Loc :=
+  if i < self.elemCt then
+    return self.start.plusBytes (self.elemWidth * i)
+  else
+    throw {elemCt := self.elemCt, idx := i}
 
-/-- Move by `x` bytes within current segment. -/
-@[inline]
-def moveOffBytes (x : Int32) (d : Decoder α) : Decoder α :=
-  fun msg loc ctx => d msg {loc with idx := loc.idx + x} ctx
+end List
 
-/-- Move by `x` words from current location. -/
-@[inline]
-def moveOffWords (x : Int32) (d : Decoder α) : Decoder α :=
-  fun msg loc ctx =>
-    d msg {loc with idx := loc.idx + 8 * (show UInt32 from x)} ctx
+namespace AnyPointer
 
-/-- Move to a different location (potentially another segment). -/
-@[inline]
-def moveLoc (loc : Message.Loc) (d : Decoder α) : Decoder α :=
-  fun msg _ ctx => d msg loc ctx
+inductive ResolveError
+  | unexpectedPointer (p : AnyPointer)
+  | unexpectedLandingPad (fp : FarPointer) (lp : AnyPointer)
+  | unexpectedFarLPTag (fp : FarPointer) (lp : FarPointer) (tag : AnyPointer)
+  | unexpectedListTag (p : ListPointer) (tag : AnyPointer)
+  | unexpectedListElemSize (p : ListPointer) (elemSize : UInt8)
+  | oob (p : ListPointer) (oob : Message.OutOfBounds)
+  | oob2 (fp : FarPointer) (oob : Message.OutOfBounds)
+  | oob3 (fp lp : FarPointer) (oob : Message.OutOfBounds)
+
+abbrev ReadM := ReaderT Message <| Except ResolveError
 
 /--
-Follow a struct pointer.
+Resolve pointer `p` as a struct pointer, assuming it was at location `loc`.
 -/
 @[inline]
-def structPtr (d : StructDecoder α) : Decoder (Option α) :=
-  context "structPtr" <| do
-  let p : AnyPointer ← anyPointer
-  context s!"{p}" <| do
+private def resolveStructPtr (loc : Message.Loc) (p : AnyPointer) : ReadM Struct := do
   if p.isNull then
-    return none
+    return HasDefault.default
 
   if h : p.isStruct then
     return ← handleSegPointer {p with}
 
   else if h : p.isFar then
-    let p : FarPointer := {p with}
-    moveLoc p.toLoc do
-      let lp : AnyPointer ← anyPointer
-      if !p.landingPadIsFar then
-        if lp.isNull then
-          return none
+    let fp : FarPointer := {p with}
+    let lp : AnyPointer := ⟨←
+      (← read).getUInt64 fp.toLoc |>.mapError (ResolveError.oob2 fp ·)
+    ⟩
+    if !fp.landingPadIsFar then
+      if lp.isNull then
+        throw <| ResolveError.unexpectedLandingPad fp lp
 
-        if h : lp.isStruct then
-          return ← handleSegPointer {lp with}
-        else
-          error s!"Expected landing pad struct pointer, got {lp}"
+      if h : lp.isStruct then
+        return ← handleSegPointer {lp with}
       else
-        if h : lp.isFar then
-          let lp : FarPointer := {lp with}
-          let tag : AnyPointer ← moveOffWords (1 : UInt32) anyPointer
-          if h : tag.isStruct then
-            let tag : StructPointer := {tag with}
-            moveLoc lp.toLoc do
-              return some <| ← d.run tag.dataSize tag.pointerSize
-          else
-            error s!"Expected tag struct pointer, got {tag}"
+        throw <| ResolveError.unexpectedLandingPad fp lp
+    else
+      if h : lp.isFar then
+        let lp : FarPointer := {lp with}
+        let tag : AnyPointer := ⟨←
+          (← read).getUInt64 (fp.toLoc.plusWords 1) |>.mapError (ResolveError.oob3 fp lp ·)
+        ⟩
+        if h : tag.isStruct then
+          let tag : StructPointer := {tag with}
+          return {
+            start := lp.toLoc
+            dataWords := tag.dataSize
+            ptrWords := tag.pointerSize
+          }
         else
-          error s!"Expected landing pad far struct pointer, got {lp}"
+          throw <| .unexpectedFarLPTag fp lp tag
+      else
+        throw <| .unexpectedLandingPad fp lp
   else
-    error s!"Expected struct or far pointer, got {p}"
+    throw <| .unexpectedPointer p
 
 where
   handleSegPointer (p : StructPointer) := do
-    return some (← moveOffWords (p.offset + 1) <| d.run p.dataSize p.pointerSize)
+    return {
+      start := {segIdx := loc.segIdx, idx := loc.idx + p.offset + 1}
+      dataWords := p.dataSize
+      ptrWords := p.pointerSize
+    }
 
 /--
-Follow a list pointer. Provides elemSize tag and listSize in bytes.
+Resolve pointer `p` as a list pointer, assuming it was at location `loc`.
 -/
 @[inline]
-private def listPtr (d : UInt8 → UInt32 → Decoder α) : Decoder (Option α) := do
-  let p : AnyPointer ← anyPointer
-  context s!"{p}" <| do
+private def resolveListPtr (loc : Message.Loc) (p : AnyPointer) : ReadM List := do
   if p.isNull then
-    return none
+    return HasDefault.default
 
   if h : p.isList then
     let p : ListPointer := {p with}
-    moveOffWords (p.offset + 1) <|
-      d p.elemSize p.size
+    let start := loc.plusWords (p.offset + (1 : Int32))
+    findTag start p
 
   else if h : p.isFar then
-    let p : FarPointer := {p with}
-    moveLoc p.toLoc do
-      let lp : AnyPointer ← anyPointer
-      context s!"{lp}" <| do
-      if !p.landingPadIsFar then
-        if lp.isNull then
-          return none
+    let fp : FarPointer := {p with}
+    let lp : AnyPointer := ⟨←
+      (← read).getUInt64 fp.toLoc |>.mapError (ResolveError.oob2 fp ·)
+    ⟩
+    if !fp.landingPadIsFar then
+      if lp.isNull then
+        throw <| .unexpectedLandingPad fp lp
 
-        if h : lp.isList then
-          let lp : ListPointer := {lp with}
-          d lp.elemSize lp.size
-        else
-          error s!"Expected landing pad list pointer, got {lp}"
+      if h : lp.isList then
+        let lp : ListPointer := {lp with}
+        let start := loc.plusWords (lp.offset + (1 : Int32))
+        findTag start lp
       else
-        if h : lp.isFar then
-          let lp : FarPointer := {lp with}
-          let tag : AnyPointer ← moveOffWords (1 : UInt32) <| (do return ⟨← uint64⟩)
-          if h : tag.isList then
-            let tag : ListPointer := {tag with}
-            moveLoc lp.toLoc do
-              d tag.elemSize tag.size
-          else
-            error s!"Expected tag list pointer, got {tag}"
+        throw <| .unexpectedLandingPad fp lp
+    else
+      if h : lp.isFar then
+        let lp : FarPointer := {lp with}
+        let tag : AnyPointer := ⟨←
+          (← read).getUInt64 (fp.toLoc.plusWords 1) |>.mapError (ResolveError.oob3 fp lp ·)
+        ⟩
+        if h : tag.isList then
+          let tag : ListPointer := {tag with}
+          let start := lp.toLoc
+          findTag start tag
         else
-          error s!"Expected landing pad far list pointer, got {lp}"
+          throw <| .unexpectedFarLPTag fp lp tag
+      else
+        throw <| .unexpectedLandingPad fp lp
   else
-    error s!"list struct or far pointer, got {p}"
+    throw <| .unexpectedPointer p
+where findTag (start) (p : ListPointer) : ReadM List := do
+  if h : p.elemSize = 7 then
+    let tag : AnyPointer := ⟨←
+      (← read).getUInt64 start |>.mapError (ResolveError.oob p ·)
+    ⟩
+    if h : tag.isStruct then
+      let tag : StructPointer := {tag with}
+      if hElemSize : _ then
+        return {
+          start := start.plusWords 1
+          elemSize := p.elemSize
+          hElemSize
+          dataSize := p.size
+          tag? := by simp [*]; exact tag
+        }
+      else
+        throw (ResolveError.unexpectedListElemSize p p.elemSize)
+    else
+      throw <| .unexpectedListTag p tag
+  else
+    if hElemSize : _ then
+      return {
+        start
+        elemSize := p.elemSize
+        hElemSize
+        dataSize := p.size
+        tag? := by simp [*]; exact ()
+      }
+    else
+      throw (ResolveError.unexpectedListElemSize p p.elemSize)
 
+end AnyPointer
 
-/-- Decode a list of booleans. -/
-def listBool : Decoder (Array Bool) :=
-  context "listBool" <| do
-  let res ← listPtr (fun elemSize size => do
-    if elemSize ≠ 1 then
-      error s!"List expected element size 1 (1 bit) but got {elemSize}"
+namespace List
 
-    let mut res : Array Bool := Array.mkEmpty size.val
-    for i in [0:size.val] do
-      let byte ← moveOffBytes (Int32.ofUInt32 (i / 8).toUInt32) <| uint8
-      let bool := (byte >>> (i % 8).toUInt8) &&& 0b1 = 0b1
-      res := res.push bool
+inductive ElemSizeError
+  | prim (expected actual : UInt8)
+  | structGotBool
 
-    return res
-  )
-  return res.getD #[]
+protected structure Void extends List where
+  elemSize0 : elemSize = 0
 
+def asVoid (self : List) : Except ElemSizeError List.Void :=
+  if h : _ then return {self with elemSize0 := h}
+  else .error (.prim 0 self.elemSize)
 
-/-- Decode a list pointer whose elements are primitive/not structs.
+protected structure Bool extends List where
+  elemSize0 : elemSize = 1
 
-`elemSize` values are the same as for `ListPointer.elemSize`:
-    0 = 0 (e.g. List(Void))
-    1 = 1 bit
-    2 = 1 byte
-    3 = 2 bytes
-    4 = 4 bytes
-    5 = 8 bytes (non-pointer)
-    6 = 8 bytes (pointer)
-    7 = composite
--/
-def listPtrPrim (elemSize : UInt8) (d : Decoder α) : Decoder (Array α) :=
-  context "listPtrPrim" <| do
-  let byteWidth ← match elemSize with
-    | 2 => pure (1 : UInt32)
-    | 3 => pure 2
-    | 4 => pure 4
-    | 5 => pure 8
-    | 6 => pure 8
-    | _ => error s!"List primitive decoder with elemSize = {elemSize}?"
-  let res ← listPtr (fun elemSize' size => do
-    if elemSize' ≠ elemSize then
-      error s!"List expected element size {elemSize} but got {elemSize'}"
+def asBool (self : List) : Except ElemSizeError List.Bool :=
+  if h : _ then return {self with elemSize0 := h}
+  else .error (.prim 0 self.elemSize)
 
-    let mut res : Array α := Array.mkEmpty size.val
-    for i in [0:size.val] do
-      let a ← moveOffBytes (byteWidth * i.toUInt32 :) d
-      res := res.push a
+protected structure UInt8 extends List where
+  elemSize0 : elemSize = 2
 
-    return res
-  )
-  return res.getD #[]
+def asUInt8 (self : List) : Except ElemSizeError List.UInt8 :=
+  if h : _ then return {self with elemSize0 := h}
+  else .error (.prim 0 self.elemSize)
+
+protected structure UInt16 extends List where
+  elemSize0 : elemSize = 3
+
+def asUInt16 (self : List) : Except ElemSizeError List.UInt16 :=
+  if h : _ then return {self with elemSize0 := h}
+  else .error (.prim 0 self.elemSize)
+
+protected structure UInt32 extends List where
+  elemSize0 : elemSize = 4
+
+def asUInt32 (self : List) : Except ElemSizeError List.UInt32 :=
+  if h : _ then return {self with elemSize0 := h}
+  else .error (.prim 0 self.elemSize)
+
+protected structure UInt64 extends List where
+  elemSize0 : elemSize = 5
+
+def asUInt64 (self : List) : Except ElemSizeError List.UInt64 :=
+  if h : _ then return {self with elemSize0 := h}
+  else .error (.prim 0 self.elemSize)
+
+protected structure Pointer extends List where
+  elemSize0 : elemSize = 6
+
+def asPointer (self : List) : Except ElemSizeError List.Pointer :=
+  if h : _ then return {self with elemSize0 := h}
+  else .error (.prim 0 self.elemSize)
+
+protected structure Struct extends List where
+  notBool : elemSize ≠ 0
+  (expectedDataWords expectedPtrWords : UInt16)
+
+def asStruct (expectedDataWords expectedPtrWords : UInt16) (self : List) : Except ElemSizeError List.Struct :=
+  if h : _ then return {self with notBool := h, expectedDataWords, expectedPtrWords}
+  else .error (.structGotBool)
+
+namespace Struct
+
+variable (self : List.Struct)
+
+/-- If interpreting this as a list of structs with expected data words `expData`,
+how many data words are present? -/
+@[inline]
+def elemDataWords : UInt16 :=
+  match self with
+  | {elemSize := ⟨⟨0,_⟩⟩, ..} => 0
+  | {elemSize := ⟨⟨1,_⟩⟩, ..}
+  | {elemSize := ⟨⟨2,_⟩⟩, ..}
+  | {elemSize := ⟨⟨3,_⟩⟩, ..}
+  | {elemSize := ⟨⟨4,_⟩⟩, ..}
+  | {elemSize := ⟨⟨5,_⟩⟩, ..} => 1
+  | {elemSize := ⟨⟨6,_⟩⟩, ..} => 0
+  | {elemSize := ⟨⟨7,_⟩⟩, tag?, ..} =>
+    let sp : StructPointer := tag?
+    sp.dataSize
+  | {elemSize := ⟨⟨n+8,_⟩⟩, ..} =>
+    by contradiction
+
+/-- If interpreting this as a list of structs with expected data words `expData`,
+how many pointer words are present? -/
+@[inline]
+def elemPtrWords : UInt16 :=
+  match self with
+  | {elemSize := ⟨⟨0,_⟩⟩, ..} => 0
+  | {elemSize := ⟨⟨1,_⟩⟩, ..}
+  | {elemSize := ⟨⟨2,_⟩⟩, ..}
+  | {elemSize := ⟨⟨3,_⟩⟩, ..}
+  | {elemSize := ⟨⟨4,_⟩⟩, ..}
+  | {elemSize := ⟨⟨5,_⟩⟩, ..} => 0
+  | {elemSize := ⟨⟨6,_⟩⟩, ..} => 1
+  | {elemSize := ⟨⟨7,_⟩⟩, tag?, ..} =>
+    let sp : StructPointer := tag?
+    sp.pointerSize
+  | {elemSize := ⟨⟨n+8,_⟩⟩, ..} =>
+    by contradiction
+
+end Struct
+
+inductive ReadError
+  | oob (oob : OutOfBounds)
+  | msgOob (elemWidth : UInt32) (elemCt : UInt32) (oob : Message.OutOfBounds)
+
+abbrev ReadM := ReaderT Message <| Except ReadError
+
+/-- Get `i`th bool. -/
+def Bool.get (i : UInt32) (self : List.Bool) : ReadM Bool := do
+  let loc ← self.getLocOfIdx (i / 8) |>.mapError (ReadError.oob)
+  let byte ← (← read).getUInt8 loc |>.mapError (ReadError.msgOob self.elemWidth self.elemCt)
+  let bool := (byte >>> (i % 8).toUInt8) &&& 0b1 = 0b1
+  return bool
+
+def UInt8.get (i : UInt32) (self : List.UInt8) : ReadM UInt8 := do
+  let loc ← self.getLocOfIdx i |>.mapError (ReadError.oob)
+  let byte ← (← read).getUInt8 loc |>.mapError (ReadError.msgOob self.elemWidth self.elemCt)
+  return byte
+
+def UInt16.get (i : UInt32) (self : List.UInt16) : ReadM UInt16 := do
+  let loc ← self.getLocOfIdx i |>.mapError (ReadError.oob)
+  let res ← (← read).getUInt16 loc |>.mapError (ReadError.msgOob self.elemWidth self.elemCt)
+  return res
+
+def UInt32.get (i : UInt32) (self : List.UInt32) : ReadM UInt32 := do
+  let loc ← self.getLocOfIdx i |>.mapError (ReadError.oob)
+  let res ← (← read).getUInt32 loc |>.mapError (ReadError.msgOob self.elemWidth self.elemCt)
+  return res
+
+def UInt64.get (i : UInt32) (self : List.UInt64) : ReadM UInt64 := do
+  let loc ← self.getLocOfIdx i |>.mapError (ReadError.oob)
+  let res ← (← read).getUInt64 loc |>.mapError (ReadError.msgOob self.elemWidth self.elemCt)
+  return res
+
+def Pointer.get (i : UInt32) (self : List.Pointer) : ReadM AnyPointer := do
+  let loc ← self.getLocOfIdx i |>.mapError (ReadError.oob)
+  let res ← (← read).getUInt64 loc |>.mapError (ReadError.msgOob self.elemWidth self.elemCt)
+  return ⟨res⟩
 
 /-- Decode a list pointer whose elements are structs. -/
 @[inline]
-def listPtrStruct (d : StructDecoder α) : Decoder (Array α) :=
-  context "listPtrStruct" <| do
-  let res ← listPtr (fun elemSize size =>
-    context "listPtr continuation" <| do
-    if elemSize = 7 then
-      -- Composite: the first word of the object data is a tag
-      let tag ← anyPointer
-      if h : tag.isStruct then
-        let tag : StructPointer := {tag with}
-        let numElems : UInt32 := tag.offset
-        let dataWords := tag.dataSize
-        let ptrWords := tag.pointerSize
-        if (dataWords.toUInt32 + ptrWords.toUInt32) * numElems ≠ size then
-          error s!"list ptr struct math not working out: {dataWords}, {ptrWords}, {numElems}, {size}"
-        moveOffWords (1 : UInt32) do
-        let mut res : Array α := Array.mkEmpty numElems.val
-        for i in [0:numElems.val] do
-          let a ← moveOffWords ((dataWords.toUInt32 + ptrWords.toUInt32) * i.toUInt32)
-                  <| d.run dataWords ptrWords
-          res := res.push a
-        return res
-      else
-        error s!"Composite list pointer -- expected struct tag word, got {tag}"
-    else
-      -- elemSize is allowed to be 2 (1 byte) thru 6 (8 bytes)
-      -- and interpreted as a prefix of the struct
-      error s!"Not supported: list with elem size tag {elemSize} interpreted as struct"
-  )
-  return res.getD #[]
+def Struct.get (i : UInt32) (self : List.Struct) : ReadM Struct := do
+  let loc ← self.getLocOfIdx i |>.mapError (ReadError.oob)
+  return {
+    start := loc
+    dataWords := self.elemDataWords
+    ptrWords  := self.elemPtrWords
+  }
 
-def data : Decoder ByteArray := do
-  let res ← listPtr (fun elemSize elemCount => do
-    if elemSize ≠ 2 then
-      error s!"data pointer has elemSize {elemSize}"
-    let seg ← getSeg
-    let loc ← getLoc
-    return seg.data.copySlice
-      (srcOff := loc.idx.toNat)
-      (dest := ByteArray.empty) (destOff := 0)
-      (len := elemCount.toNat)
-  )
-  return res.getD (ByteArray.empty)
+end List
 
-def text : Decoder String := do
-  let bytes ← data
-  match String.fromUTF8? bytes with
-  | none => error "expected text, but bytes are not valid UTF8"
-  | some s => pure s
+def Data := List.UInt8
 
-end Decoder
+def Data.getBytes (d : Data) : ReaderT Message (Except Message.OutOfBounds) ByteArray := do
+  let start := d.start
+  let len := d.elemCt
+  let msg := (← read)
+  let some seg := msg.segments.get? start.segIdx.val | throw (Message.OutOfBounds.seg start msg.segments.size)
+  if start.idx.val + len.val ≤ seg.data.size then
+    let res := seg.data.copySlice start.idx.val (ByteArray.mkEmpty len.val) 0 len.val
+    return res
+  else
+    throw (Message.OutOfBounds.idx start len.val seg.data.size)
 
-def decode (f : StructDecoder α) (msg : Message) : Except DecodeError (Option α) :=
-  (Decoder.structPtr f) msg {segIdx := 0, idx := 0} []
+def Text := Data
