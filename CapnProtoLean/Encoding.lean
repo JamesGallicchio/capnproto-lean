@@ -330,89 +330,9 @@ instance : HasDefault Struct where
     ptrWords := 0
   }
 
-
-abbrev ReadM := ReaderT Message <| Except Message.OutOfBounds
-
-variable (self : Struct)
-
-/-- Read a `Bool` at `offset` bytes into the struct's data section. -/
-@[inline]
-def bool (offset : UInt32) (bit : UInt8) : ReadM Bool := do
-  if offset < 8 * self.dataWords.toUInt32 then
-    let byte ← (← read).getUInt8 (self.start.plusBytes offset)
-    return (byte >>> bit) &&& 0b1 = 0b1
-  else
-    return HasDefault.default
-
-/-- Read a `UInt8` at `offset` bytes into the struct's data section. -/
-@[inline]
-def uint8 (offset : UInt32) : ReadM UInt8 := do
-  if offset < 8 * self.dataWords.toUInt32 then
-    (← read).getUInt8 (self.start.plusBytes offset)
-  else
-    return HasDefault.default
-
-/-- Read a `UInt16` at `offset` bytes into the struct's data section. -/
-@[inline]
-def uint16 (offset : UInt32) : ReadM UInt16 := do
-  if offset < 8 * self.dataWords.toUInt32 then
-    (← read).getUInt16 (self.start.plusBytes offset)
-  else
-    return HasDefault.default
-
-/-- Read a `UInt32` at `offset` bytes into the struct's data section. -/
-@[inline]
-def uint32 (offset : UInt32) : ReadM UInt32 := do
-  if offset < 8 * self.dataWords.toUInt32 then
-    (← read).getUInt32 (self.start.plusBytes offset)
-  else
-    return HasDefault.default
-
-/-- Read a `UInt64` at `offset` bytes into the struct's data section. -/
-@[inline]
-def uint64 (offset : UInt32) : ReadM UInt64 := do
-  if offset < 8 * self.dataWords.toUInt32 then
-    (← read).getUInt64 (self.start.plusBytes offset)
-  else
-    return HasDefault.default
-
-/-- Read a `Int8` at `offset` bytes into the struct's data section. -/
-@[inline]
-def int8 (offset : UInt32) : ReadM Int8 := do
-  return (← self.uint8 offset)
-
-/-- Read a `Int16` at `offset` bytes into the struct's data section. -/
-@[inline]
-def int16 (offset : UInt32) : ReadM Int16 := do
-  return (← self.uint16 offset)
-
-/-- Read a `Int32` at `offset` bytes into the struct's data section. -/
-@[inline]
-def int32 (offset : UInt32) : ReadM Int32 := do
-  return (← self.uint32 offset)
-
-/-- Read a `Int64` at `offset` bytes into the struct's data section. -/
-@[inline]
-def int64 (offset : UInt32) : ReadM Int64 := do
-  return (← self.uint64 offset)
-
-/-- Read a `Float32` at `offset` bytes into the struct's data section. -/
-@[inline]
-def float32 (offset : UInt32) : ReadM Float32 := do
-  return (← self.uint32 offset)
-
-/-- Read a `Float64` at `offset` bytes into the struct's data section. -/
-@[inline]
-def float64 (offset : UInt32) : ReadM Float64 := do
-  return Float64.ofUInt64 (← self.uint64 offset)
-
-/-- Read a pointer at `offset` *words* into the struct's pointer section. -/
-@[inline]
-def anyPointer (offset : UInt16) : ReadM AnyPointer := do
-  if offset < self.ptrWords then
-    return ⟨← (← read).getUInt64 (self.start.plusWords (self.dataWords + offset).toUInt32)⟩
-  else
-    return HasDefault.default
+class IsStruct (α : Type) where
+  fromStruct : Struct → α
+  (expectedDataWords expectedPtrWords : UInt16)
 
 end Struct
 
@@ -469,6 +389,10 @@ def getLocOfIdx (i : UInt32) : Except OutOfBounds Message.Loc :=
     return self.start.plusBytes (self.elemWidth * i)
   else
     throw {elemCt := self.elemCt, idx := i}
+
+inductive ElemSizeError
+  | prim (expected actual : UInt8)
+  | structGotBool
 
 end List
 
@@ -615,11 +539,169 @@ where findTag (start) (p : ListPointer) : ReadM List := do
 
 end AnyPointer
 
-namespace List
+inductive DecodeErr
+| messageOOB (e : Message.OutOfBounds)
+| resolveErr (e : AnyPointer.ResolveError)
+| listOOB (e : List.OutOfBounds)
+| listElemSize (e : List.ElemSizeError)
 
-inductive ElemSizeError
-  | prim (expected actual : UInt8)
-  | structGotBool
+instance : Coe Message.OutOfBounds DecodeErr := ⟨DecodeErr.messageOOB⟩
+instance : Coe AnyPointer.ResolveError DecodeErr := ⟨DecodeErr.resolveErr⟩
+instance : Coe List.OutOfBounds DecodeErr := ⟨DecodeErr.listOOB⟩
+instance : Coe List.ElemSizeError DecodeErr := ⟨DecodeErr.listElemSize⟩
+
+def DecodeM := ReaderT Message <| Except DecodeErr
+deriving Monad, MonadReader, MonadExcept
+
+instance : MonadLift (AnyPointer.ReadM) DecodeM where
+monadLift m := do
+    match m (← read) with
+    | .ok a => return a
+    | .error e => throw (↑e)
+
+instance : MonadLift (Except Message.OutOfBounds) DecodeM where
+monadLift m := do
+    match m with
+    | .ok a => return a
+    | .error e => throw (↑e)
+
+instance : MonadLift (Except List.OutOfBounds) DecodeM where
+monadLift m := do
+    match m with
+    | .ok a => return a
+    | .error e => throw (↑e)
+
+instance : MonadLift (Except List.ElemSizeError) DecodeM where
+monadLift m := do
+    match m with
+    | .ok a => return a
+    | .error e => throw (↑e)
+
+namespace Struct
+
+variable (self : Struct)
+
+/-- Read a `Bool` at `offset` bits into the struct's data section. -/
+@[inline]
+def bool (offset : UInt32) : DecodeM Bool := do
+  if offset < 64 * self.dataWords.toUInt32 then
+    let byteIdx := offset / 8
+    let bitIdx := (offset % 8).toUInt8
+    let byte ← (← read).getUInt8 (self.start.plusBytes byteIdx)
+    return (byte >>> bitIdx) &&& 0b1 = 0b1
+  else
+    return HasDefault.default
+
+/-- Read a `UInt8` at `offset` bytes into the struct's data section. -/
+@[inline]
+def uint8 (offset : UInt32) : DecodeM UInt8 := do
+  if offset < 8 * self.dataWords.toUInt32 then
+    (← read).getUInt8 (self.start.plusBytes offset)
+  else
+    return HasDefault.default
+
+/-- Read a `UInt16` at `offset` bytes into the struct's data section. -/
+@[inline]
+def uint16 (offset : UInt32) : DecodeM UInt16 := do
+  if offset < 8 * self.dataWords.toUInt32 then
+    (← read).getUInt16 (self.start.plusBytes offset)
+  else
+    return HasDefault.default
+
+/-- Read a `UInt32` at `offset` bytes into the struct's data section. -/
+@[inline]
+def uint32 (offset : UInt32) : DecodeM UInt32 := do
+  if offset < 8 * self.dataWords.toUInt32 then
+    (← read).getUInt32 (self.start.plusBytes offset)
+  else
+    return HasDefault.default
+
+/-- Read a `UInt64` at `offset` bytes into the struct's data section. -/
+@[inline]
+def uint64 (offset : UInt32) : DecodeM UInt64 := do
+  if offset < 8 * self.dataWords.toUInt32 then
+    (← read).getUInt64 (self.start.plusBytes offset)
+  else
+    return HasDefault.default
+
+/-- Read a `Int8` at `offset` bytes into the struct's data section. -/
+@[inline]
+def int8 (offset : UInt32) : DecodeM Int8 := do
+  return (← self.uint8 offset)
+
+/-- Read a `Int16` at `offset` bytes into the struct's data section. -/
+@[inline]
+def int16 (offset : UInt32) : DecodeM Int16 := do
+  return (← self.uint16 offset)
+
+/-- Read a `Int32` at `offset` bytes into the struct's data section. -/
+@[inline]
+def int32 (offset : UInt32) : DecodeM Int32 := do
+  return (← self.uint32 offset)
+
+/-- Read a `Int64` at `offset` bytes into the struct's data section. -/
+@[inline]
+def int64 (offset : UInt32) : DecodeM Int64 := do
+  return (← self.uint64 offset)
+
+/-- Read a `Float32` at `offset` bytes into the struct's data section. -/
+@[inline]
+def float32 (offset : UInt32) : DecodeM Float32 := do
+  return (← self.uint32 offset)
+
+/-- Read a `Float64` at `offset` bytes into the struct's data section. -/
+@[inline]
+def float64 (offset : UInt32) : DecodeM Float64 := do
+  return Float64.ofUInt64 (← self.uint64 offset)
+
+/-- Read a pointer at `offset` *words* into the struct's pointer section. -/
+@[inline]
+def anyPointer (offset : UInt32) : DecodeM AnyPointer := do
+  if offset < self.ptrWords.toUInt32 then
+    return ⟨← (← read).getUInt64 (self.start.plusWords (self.dataWords.toUInt32 + offset))⟩
+  else
+    return HasDefault.default
+
+@[inline]
+def struct (offset : UInt32) : DecodeM Struct := do
+  if offset < self.ptrWords.toUInt32 then
+    let loc := self.start.plusWords (self.dataWords.toUInt32 + offset)
+    let p : AnyPointer := ⟨← (← read).getUInt64 loc⟩
+    p.resolveStructPtr loc
+  else
+    return HasDefault.default
+
+@[inline]
+def list (offset : UInt32) : DecodeM List := do
+  if offset < self.ptrWords.toUInt32 then
+    let loc := self.start.plusWords (self.dataWords.toUInt32 + offset)
+    let p : AnyPointer := ⟨← (← read).getUInt64 loc⟩
+    p.resolveListPtr loc
+  else
+    return HasDefault.default
+
+class HasStructAccessor (α : Type) where
+  get : Struct → UInt32 → DecodeM α
+
+instance : HasStructAccessor Bool     := ⟨fun s off m => do bool s off m⟩
+instance : HasStructAccessor UInt8    := ⟨fun s off m => do uint8 s off m⟩
+instance : HasStructAccessor UInt16   := ⟨fun s off m => do uint16 s off m⟩
+instance : HasStructAccessor UInt32   := ⟨fun s off m => do uint32 s off m⟩
+instance : HasStructAccessor UInt64   := ⟨fun s off m => do uint64 s off m⟩
+instance : HasStructAccessor Int8     := ⟨fun s off m => do int8 s off m⟩
+instance : HasStructAccessor Int16    := ⟨fun s off m => do int16 s off m⟩
+instance : HasStructAccessor Int32    := ⟨fun s off m => do int32 s off m⟩
+instance : HasStructAccessor Int64    := ⟨fun s off m => do int64 s off m⟩
+instance : HasStructAccessor Float32  := ⟨fun s off m => do float32 s off m⟩
+instance : HasStructAccessor Float64  := ⟨fun s off m => do float64 s off m⟩
+instance : HasStructAccessor AnyPointer := ⟨anyPointer⟩
+instance : HasStructAccessor Struct := ⟨struct⟩
+instance : HasStructAccessor List := ⟨list⟩
+instance [IsStruct α] : HasStructAccessor α := ⟨(IsStruct.fromStruct <$> struct · ·)⟩
+
+end Struct
+
+namespace List
 
 protected structure Void extends List where
   elemSize0 : elemSize = 0
@@ -672,18 +754,16 @@ def asPointer (self : List) : Except ElemSizeError List.Pointer :=
 
 protected structure Struct extends List where
   notBool : elemSize ≠ 0
-  (expectedDataWords expectedPtrWords : UInt16)
 
-def asStruct (expectedDataWords expectedPtrWords : UInt16) (self : List) : Except ElemSizeError List.Struct :=
-  if h : _ then return {self with notBool := h, expectedDataWords, expectedPtrWords}
+def asStruct (self : List) : Except ElemSizeError List.Struct :=
+  if h : _ then return {self with notBool := h}
   else .error (.structGotBool)
 
 namespace Struct
 
 variable (self : List.Struct)
 
-/-- If interpreting this as a list of structs with expected data words `expData`,
-how many data words are present? -/
+/-- If interpreting this as a list of structs, how many data words are present? -/
 @[inline]
 def elemDataWords : UInt16 :=
   match self with
@@ -700,8 +780,7 @@ def elemDataWords : UInt16 :=
   | {elemSize := ⟨⟨n+8,_⟩⟩, ..} =>
     by contradiction
 
-/-- If interpreting this as a list of structs with expected data words `expData`,
-how many pointer words are present? -/
+/-- If interpreting this as a list of structs, how many pointer words are present? -/
 @[inline]
 def elemPtrWords : UInt16 :=
   match self with
@@ -720,53 +799,117 @@ def elemPtrWords : UInt16 :=
 
 end Struct
 
-inductive ReadError
-  | oob (oob : OutOfBounds)
-  | msgOob (elemWidth : UInt32) (elemCt : UInt32) (oob : Message.OutOfBounds)
-
-abbrev ReadM := ReaderT Message <| Except ReadError
-
 /-- Get `i`th bool. -/
-def Bool.get (i : UInt32) (self : List.Bool) : ReadM Bool := do
-  let loc ← self.getLocOfIdx (i / 8) |>.mapError (ReadError.oob)
-  let byte ← (← read).getUInt8 loc |>.mapError (ReadError.msgOob self.elemWidth self.elemCt)
+def Bool.get (i : UInt32) (self : List.Bool) : DecodeM Bool := do
+  let loc ← self.getLocOfIdx (i / 8)
+  let byte ← (← read).getUInt8 loc
   let bool := (byte >>> (i % 8).toUInt8) &&& 0b1 = 0b1
   return bool
 
-def UInt8.get (i : UInt32) (self : List.UInt8) : ReadM UInt8 := do
-  let loc ← self.getLocOfIdx i |>.mapError (ReadError.oob)
-  let byte ← (← read).getUInt8 loc |>.mapError (ReadError.msgOob self.elemWidth self.elemCt)
+def UInt8.get (i : UInt32) (self : List.UInt8) : DecodeM UInt8 := do
+  let loc ← self.getLocOfIdx i
+  let byte ← (← read).getUInt8 loc
   return byte
 
-def UInt16.get (i : UInt32) (self : List.UInt16) : ReadM UInt16 := do
-  let loc ← self.getLocOfIdx i |>.mapError (ReadError.oob)
-  let res ← (← read).getUInt16 loc |>.mapError (ReadError.msgOob self.elemWidth self.elemCt)
+def UInt16.get (i : UInt32) (self : List.UInt16) : DecodeM UInt16 := do
+  let loc ← self.getLocOfIdx i
+  let res ← (← read).getUInt16 loc
   return res
 
-def UInt32.get (i : UInt32) (self : List.UInt32) : ReadM UInt32 := do
-  let loc ← self.getLocOfIdx i |>.mapError (ReadError.oob)
-  let res ← (← read).getUInt32 loc |>.mapError (ReadError.msgOob self.elemWidth self.elemCt)
+def UInt32.get (i : UInt32) (self : List.UInt32) : DecodeM UInt32 := do
+  let loc ← self.getLocOfIdx i
+  let res ← (← read).getUInt32 loc
   return res
 
-def UInt64.get (i : UInt32) (self : List.UInt64) : ReadM UInt64 := do
-  let loc ← self.getLocOfIdx i |>.mapError (ReadError.oob)
-  let res ← (← read).getUInt64 loc |>.mapError (ReadError.msgOob self.elemWidth self.elemCt)
+def UInt64.get (i : UInt32) (self : List.UInt64) : DecodeM UInt64 := do
+  let loc ← self.getLocOfIdx i
+  let res ← (← read).getUInt64 loc
   return res
 
-def Pointer.get (i : UInt32) (self : List.Pointer) : ReadM AnyPointer := do
-  let loc ← self.getLocOfIdx i |>.mapError (ReadError.oob)
-  let res ← (← read).getUInt64 loc |>.mapError (ReadError.msgOob self.elemWidth self.elemCt)
+def Pointer.get (i : UInt32) (self : List.Pointer) : DecodeM AnyPointer := do
+  let loc ← self.getLocOfIdx i
+  let res ← (← read).getUInt64 loc
   return ⟨res⟩
+
+def Pointer.getStruct (i : UInt32) (self : List.Pointer) : DecodeM Struct := do
+  let loc ← self.getLocOfIdx i
+  let p : AnyPointer := ⟨← (← read).getUInt64 loc⟩
+  p.resolveStructPtr loc
+
+def Pointer.getList (i : UInt32) (self : List.Pointer) : DecodeM List := do
+  let loc ← self.getLocOfIdx i
+  let p : AnyPointer := ⟨← (← read).getUInt64 loc⟩
+  p.resolveListPtr loc
 
 /-- Decode a list pointer whose elements are structs. -/
 @[inline]
-def Struct.get (i : UInt32) (self : List.Struct) : ReadM Struct := do
-  let loc ← self.getLocOfIdx i |>.mapError (ReadError.oob)
+def Struct.get (i : UInt32) (self : List.Struct) : DecodeM Struct := do
+  let loc ← self.getLocOfIdx i
   return {
     start := loc
     dataWords := self.elemDataWords
     ptrWords  := self.elemPtrWords
   }
+
+class CanList (α : Type) where
+  listTy : Type
+  fromList : List → Except ElemSizeError listTy
+  toList : listTy → List
+  get : UInt32 → listTy → DecodeM α
+
+instance : CanList Bool where
+  listTy := List.Bool
+  fromList := List.asBool
+  toList := List.Bool.toList
+  get i l := do List.Bool.get i l
+
+instance : CanList UInt8 where
+  listTy := List.UInt8
+  fromList := List.asUInt8
+  toList := List.UInt8.toList
+  get := List.UInt8.get
+
+instance : CanList UInt16 where
+  listTy := List.UInt16
+  fromList := List.asUInt16
+  toList := List.UInt16.toList
+  get := List.UInt16.get
+
+instance : CanList UInt32 where
+  listTy := List.UInt32
+  fromList := List.asUInt32
+  toList := List.UInt32.toList
+  get := List.UInt32.get
+
+instance : CanList UInt64 where
+  listTy := List.UInt64
+  fromList := List.asUInt64
+  toList := List.UInt64.toList
+  get := List.UInt64.get
+
+instance [Struct.IsStruct α] : CanList α where
+  listTy := List.Struct
+  fromList := List.asStruct
+  toList := List.Struct.toList
+  get i l := Struct.IsStruct.fromStruct <$> List.Struct.get i l
+
+/-- Helper type so that `List.P α` looks directly usable -/
+def P (α : Type) [CanList α] := CanList.listTy α
+def P.size [CanList α] (l : P α) : UInt32 := (CanList.toList l).elemCt
+def P.get [CanList α] (i : UInt32) (l : P α) : DecodeM α := CanList.get i l
+
+instance [CanList α] : CanList (P α) where
+  listTy := List.Pointer
+  fromList := List.asPointer
+  toList := List.Pointer.toList
+  get i l := do
+    let l ← List.Pointer.getList i l
+    CanList.fromList l
+
+instance [CanList α] : Struct.HasStructAccessor (P α) where
+  get s off := do
+    let l ← Struct.list s off
+    CanList.fromList l
 
 end List
 

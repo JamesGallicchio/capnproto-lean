@@ -21,7 +21,7 @@ inductive Node.Body : Type
 | struct
   (dataWordCount : UInt16)
   (pointerCount : UInt16)
-  (preferredArrayEncoding : ElementSize)
+  (preferredListEncoding : ElementSize)
   (isGroup : Bool)
   (discriminantCount : UInt16)
   (discriminantOffset : UInt32)
@@ -251,59 +251,3 @@ structure CodeGeneratorRequest where
   sourceInfo : Array Node.SourceInfo
   requestedFiles : Array CodeGeneratorRequest.RequestedFile
 deriving Repr
-
-
-open Decoder
-
-mutual
-def CapnpVersion.decoder : StructDecoder CapnpVersion :=
-  fun dataWords ptrWords =>
-  context "capnpversion" do
-  if dataWords ≠ 1 then
-    error s!"CapnpVersion: dataWords: {dataWords}"
-  if ptrWords ≠ 0 then
-    error s!"CapnpVersion: ptrWords: {ptrWords}"
-  let major ← context "data[0]" <| moveOffBytes 0 <| uint16
-  let minor ← context "data[2]" <| moveOffBytes 2 <| uint8
-  let micro ← context "data[3]" <| moveOffBytes 3 <| uint8
-  return {major,minor,micro}
-
-def CodeGeneratorRequest.RequestedFile.Import.decoder
-    : StructDecoder CodeGeneratorRequest.RequestedFile.Import :=
-  fun dataWords ptrWords =>
-  context "codegeneratorrequest.RequestedFile.Import" do
-  if dataWords ≠ 1 then
-    error s!"dataWords: {dataWords}"
-  if ptrWords ≠ 1 then
-    error s!"ptrWords: {ptrWords}"
-  let id ← context "data[0]" <| moveOffBytes 0 <| uint64
-  let name ← context "ptr[0]" <| moveOffWords (1 + 0) <| text
-  return .mk (id := id) (name := name)
-
-def CodeGeneratorRequest.RequestedFile.decoder : StructDecoder CodeGeneratorRequest.RequestedFile :=
-  fun dataWords ptrWords =>
-  context "codegeneratorrequest.RequestedFile" do
-  if dataWords ≠ 1 then
-    error s!"dataWords: {dataWords}"
-  if ptrWords ≠ 2 then
-    error s!"ptrWords: {ptrWords}"
-  let id ← context "data[0]" <| moveOffBytes 0 <| uint64
-  let filename ← context "ptr[0]" <| moveOffWords (1 + 0) <| text
-  let imports ← context "ptr[1]" <| moveOffWords (1 + 1) <|
-    listPtrStruct CodeGeneratorRequest.RequestedFile.Import.decoder
-  return .mk (id := id) (filename := filename) (imports := imports)
-
-def CodeGeneratorRequest.decoder : StructDecoder CodeGeneratorRequest :=
-  fun dataWords ptrWords =>
-  context "codegeneratorrequest" do
-  if dataWords ≠ 0 then
-    error s!"CodeGenReq: dataWords: {dataWords}"
-  if ptrWords ≠ 4 then
-    error s!"CodeGenReq: ptrWords: {ptrWords}"
-  let capnpVersion ← context "ptr[2]" <| moveOffWords 2 <| structPtr CapnpVersion.decoder
-  let nodes := #[]
-  let sourceInfo := #[]
-  let requestedFiles ← context "ptr[1]" <| moveOffWords (0 + 1) <|
-    listPtrStruct CodeGeneratorRequest.RequestedFile.decoder
-  return {capnpVersion,nodes,sourceInfo,requestedFiles}
-end

@@ -3,30 +3,142 @@ import Qq
 
 import CapnProtoLean.Schema
 
-namespace CapnProtoLean
+namespace CapnProtoLean.Macro
 
 open Lean CodeAction Elab Command Meta Qq
 
+structure State where
+  nameMap : Batteries.HashMap Id Name
+
+def typeToLean (t : «Type») (state : State) : TermElabM Term := do
+  match t with
+  | .mk body =>
+  match body with
+  | .void    => return mkIdent ``Unit
+  | .bool    => return mkIdent ``Bool
+  | .int8    => return mkIdent ``Int8
+  | .int16   => return mkIdent ``Int16
+  | .int32   => return mkIdent ``Int32
+  | .int64   => return mkIdent ``Int64
+  | .uint8   => return mkIdent ``UInt8
+  | .uint16  => return mkIdent ``UInt16
+  | .uint32  => return mkIdent ``UInt32
+  | .uint64  => return mkIdent ``UInt64
+  | .float32 => return mkIdent ``Float32
+  | .float64 => return mkIdent ``Float64
+  | .text    => return mkIdent ``Text
+  | .data    => return mkIdent ``Data
+  | .list elementType  => return Syntax.mkApp (mkIdent ``List.P) #[← typeToLean elementType state]
+  | .enum typeId brand =>
+    let some name := state.nameMap.find? typeId
+        | throwError "typeToLean called on unrecognized enum {typeId}"
+    `($(mkIdent name))
+  | .struct typeId brand =>
+    let some name := state.nameMap.find? typeId
+        | throwError "typeToLean called on unrecognized struct {typeId}"
+    `($(mkIdent name))
+  | .interface typeId brand =>
+    throwError "typeToLean called on interface (not yet supported)"
+  | .anyPointer a =>
+    throwError "typeToLean called on anypointer (unsure where this comes up!)"
+
 def genTopLevel (c : CodeGeneratorRequest) : CommandElabM (TSyntaxArray `command) := do
   let {nodes,capnpVersion:=_, sourceInfo:=_, requestedFiles:=_} := c
-  let mut types : TSyntaxArray `command := #[]
-  let mut decoders : TSyntaxArray `command := #[]
-  for n in nodes do
-    match n with
-    | .mk id displayName displayNamePrefixLength scopeId parameters isGeneric nestedNodes annotations body =>
-    logInfo displayName
+  let state : State := Id.run do
+    let mut res := .empty
+    for n in nodes do
+      match n with
+      | .mk (id := id) (displayName := displayName) (body := body) .. =>
+      match body with
+      | .struct .. =>
+        let tyName : Name := .mkSimple displayName
+        res := res.insert id tyName
+      | _ => pure ()
+    return {nameMap := res}
+  -- Generate declarations to declare all the type aliases we need
+  let typeDefs : Syntax.TSepArray `command "\n" ← (do
+    let mut res := #[]
+    for n in nodes do
+      match n with
+      | .mk (id := id) (body := .struct dataWordCount ptrCount ..) .. =>
+        let name := state.nameMap.find! id
+        res := res.push (← `(
+          def $(mkIdent name) : Type := $(mkIdent ``Struct)
+        ))
+        res := res.push (← `(
+          instance : $(mkIdent ``Struct.IsStruct) $(mkIdent name) where
+            $(mkIdent `fromStruct) := $(mkIdent ``id)
+            $(mkIdent `expectedDataWords) := $(Syntax.mkNumLit <| toString dataWordCount)
+            $(mkIdent `expectedPtrWords) := $(Syntax.mkNumLit <| toString ptrCount)
+        ))
+      | _ => continue
+    return res)
+  let methodDefs : TSyntaxArray `command ← (do
+    let mut res := #[]
+    for n in nodes do
+      match n with
+      | .mk (id := id) (body := body) .. =>
+      match body with
+      | .struct dataWordCount pointerCount _preferredListEncoding _isGroup
+          discriminantCount discriminantOffset
+          fields =>
+        let tyName := state.nameMap.find! id
+        for f in fields do
+          match f with
+          | .mk (name := name) (body := body) .. =>
+          match body with
+          | .slot offset type .. =>
+            let type : Term :=
+              Syntax.mkApp (mkIdent ``DecodeM) #[← liftTermElabM <| typeToLean type state]
+            let impl : Term :=
+              Syntax.mkApp (mkIdent ``Struct.HasStructAccessor.get)
+                #[mkIdent `self, Syntax.mkNumLit <| toString offset]
+            res := res.push (← `(
+              def $(mkIdent <| tyName.str name) ($(mkIdent `self) : $(mkIdent tyName)) : $type := $impl
+            ))
+          | .group fieldTypeId =>
+            pure ()
+      | _ => pure ()
+    return res)
 
-  let mutualTypes ← `(command|
-    mutual
-    $types:command*
-    end
-  )
-  let mutualDecs ← `(command|
-    mutual
-    $decoders:command*
-    end
-  )
-  return #[mutualTypes, mutualDecs]
+  /-for n in nodes do
+    match n with
+    | .mk id displayName displayNamePrefixLength scopeId
+        parameters isGeneric nestedNodes annotations body =>
+    logInfo m!"Processing {displayName}"
+    match body with
+    | .file => continue
+    | .const type value =>
+      logError "const not yet supported"
+    | .enum enumerants =>
+      logError "enum not yet supported"
+    | .struct dataWordCount pointerCount preferredListEncoding isGroup
+        discriminantCount discriminantOffset
+        fields =>
+      let tyName : Name := .mkSimple displayName
+      typeDefs := typeDefs.push (← `(
+        def $(mkIdent tyName) : Type := Struct
+      ))
+      let fields : TSyntaxArray `Lean.Parser.Term.bracketedBinder :=
+        fields.map (fun f =>
+          match f with
+          | .mk name codeOrder annotations discriminantValue body ordinal =>
+          match body with
+          | .slot offset type defaultValue hadExplicitDefault =>
+            logError "const not yet supported"
+          | .group typeId =>
+            sorry
+        )
+      typeDefs := typeDefs.push (← `(command|
+        inductive $(mkIdent tyName) where
+        | mk $[$fields]*
+      ))
+    | .annotation type .. =>
+      sorry
+    | .interface methods superclasses =>
+      sorry
+  -/
+  return typeDefs ++ methodDefs
 
 def readAndGen (files : Term) : CommandElabM (TSyntaxArray `command) := do
 /-
@@ -79,7 +191,7 @@ def readAndGen (files : Term) : CommandElabM (TSyntaxArray `command) := do
 
 
 syntax (name := generate_capnproto)
-  "#generate_capnproto " term (" {{ " command* "\n}}" )? : command
+  "#generate_capnproto " term (" {{" (ppLine command)* ppDedent(ppLine "}}") )? : command
 
 deriving instance TypeName for String
 
@@ -105,9 +217,12 @@ def genCapnProtoHandler : CommandElab := fun stx => do
     throwUnsupportedSyntax
 where format (files : Term) (cmds : TSyntaxArray `command) : CommandElabM Format := do
   let syn ← `(command|
-    #generate_capnproto $files {{ $cmds:command* }}
+    #generate_capnproto $files {{
+      $cmds:command*
+    }}
   )
-  return ← liftCoreM <| Lean.PrettyPrinter.formatCommand syn
+  let parenthesized ← liftCoreM <| Lean.PrettyPrinter.parenthesizeCommand syn
+  return ← liftCoreM <| Lean.PrettyPrinter.formatCommand parenthesized
 
 open Server RequestM in
 @[command_code_action generate_capnproto]
