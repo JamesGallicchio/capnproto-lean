@@ -1,6 +1,18 @@
 import CapnProtoLean.Int
 import Batteries
 
+@[simp]
+theorem UInt32.add_zero (x : UInt32) : x + 0 = x := by
+  rcases x with ⟨⟨x,hx⟩⟩
+  apply UInt32.eq_of_val_eq; apply Fin.eq_of_val_eq
+  rw [UInt32.add_def, UInt32.zero_def, Fin.add_def]
+  simp only [Fin.isValue, Fin.val_zero, Nat.add_zero]
+  exact Nat.mod_eq_of_lt hx
+--@[simp]
+--theorem UInt32.val_ofNat (n : Nat)
+--    : UInt32.val (OfNat.ofNat n) = ⟨n % UInt32.size := by
+--  rfl
+
 namespace CapnProtoLean
 
 instance : Repr ByteArray where
@@ -27,12 +39,12 @@ deriving Inhabited
 namespace Loc
 
 def plusBytes (w : UInt32) (l : Loc) : Loc := {
-  segIdx := l.segIdx
+  l with
   idx := l.idx + w
 }
 
 def plusWords (w : UInt32) (l : Loc) : Loc := {
-  segIdx := l.segIdx
+  l with
   idx := l.idx + 8 * w
 }
 
@@ -41,6 +53,22 @@ instance : ToString Loc where
     s!"{segIdx}:{idx}"
 
 end Loc
+
+def validLoc (l : Loc) (m : Message) : Bool :=
+  if h : l.segIdx.val < m.segments.size then
+    l.idx.val < (m.segments.uget l.segIdx.toUSize h).data.size
+  else
+    false
+
+theorem validLoc.segIdx {l m} (h : validLoc l m)
+  : l.segIdx.val < m.segments.size := by
+  unfold validLoc at h
+  split at h <;> simp_all [-UInt32.val_val_eq_toNat]
+
+theorem validLoc.idx {l m} (h : validLoc l m)
+  : l.idx.val < (m.segments[l.segIdx.val]'(validLoc.segIdx h)).data.size := by
+  unfold validLoc at h
+  split at h <;> simp_all
 
 /-- Read a `Message` in by repeatedly reading from a handle `h` -/
 partial def fromHandle (h : IO.FS.Handle) : IO Message := do
@@ -76,9 +104,9 @@ where
     let acc := acc ++ new
     readBytesExactAux (size - newLen) acc
 
-inductive OutOfBounds
-  | seg (loc : Message.Loc) (segs : Nat)
-  | idx (loc : Message.Loc) (len : Nat) (segLen : Nat)
+structure OutOfBounds where
+  loc : Loc
+  len : Nat
 
 variable (m : Message) (l : Loc) in
 section
@@ -90,9 +118,9 @@ def getUInt8 : Except OutOfBounds UInt8 := do
     if h : _ then
       return seg.data.uget l.idx.toUSize h
     else
-      throw <| OutOfBounds.idx l 1 seg.data.size
+      throw <| {loc := l, len := 1 : OutOfBounds}
   else
-    throw <| OutOfBounds.seg l m.segments.size
+    throw <| {loc := l, len := 1 : OutOfBounds}
 
 @[inline]
 def getUInt16 : Except OutOfBounds UInt16 := do
@@ -101,9 +129,9 @@ def getUInt16 : Except OutOfBounds UInt16 := do
     if h : _ then
       return seg.data.ugetUInt16LE l.idx.toUSize h
     else
-      throw <| OutOfBounds.idx l 1 seg.data.size
+      throw {loc := l, len := 2 : OutOfBounds}
   else
-    throw <| OutOfBounds.seg l m.segments.size
+    throw {loc := l, len := 2 : OutOfBounds}
 
 @[inline]
 def getUInt32 : Except OutOfBounds UInt32 := do
@@ -112,9 +140,9 @@ def getUInt32 : Except OutOfBounds UInt32 := do
     if h : _ then
       return seg.data.ugetUInt32LE l.idx.toUSize h
     else
-      throw <| OutOfBounds.idx l 1 seg.data.size
+      throw {loc := l, len := 4 : OutOfBounds}
   else
-    throw <| OutOfBounds.seg l m.segments.size
+    throw {loc := l, len := 4 : OutOfBounds}
 
 def getUInt64 : Except OutOfBounds UInt64 := do
   if h : _ then
@@ -122,39 +150,105 @@ def getUInt64 : Except OutOfBounds UInt64 := do
     if h : _ then
       return seg.data.ugetUInt64LE l.idx.toUSize h
     else
-      throw <| OutOfBounds.idx l 1 seg.data.size
+      throw {loc := l, len := 8 : OutOfBounds}
   else
-    throw <| OutOfBounds.seg l m.segments.size
+    throw {loc := l, len := 8 : OutOfBounds}
+
+structure Slice where
+  msg : Message
+  start : Loc
+  len : UInt32
+  segValid : start.segIdx.toNat < msg.segments.size
+  idxValid : start.idx.toNat + len.toNat ≤ (
+    msg.segments.uget start.segIdx.toUSize segValid
+  ).data.size
+
+def slice? (start : Loc) (len : UInt32) : Except OutOfBounds Slice :=
+  if h : start.segIdx.toNat < m.segments.size then
+    let seg := m.segments.uget start.segIdx.toUSize h
+    if h2 : start.idx.toNat + len.toNat ≤ seg.data.size then
+      return {
+        msg := m, start, len
+        segValid := h
+        idxValid := h2
+      }
+    else
+      throw {loc := start, len := len.val : OutOfBounds}
+  else
+    throw {loc := start, len := len.val : OutOfBounds}
+
+def Slice.getUInt8 (slice : Slice) (h : slice.len ≥ 1 := by decide) : UInt8 :=
+  let seg := slice.msg.segments.uget slice.start.segIdx.toUSize (by
+    simpa using (slice.segValid)
+  )
+  seg.data.uget slice.start.idx.toUSize (by
+    have := slice.idxValid
+    apply Nat.lt_of_lt_of_le ?_ this
+    simp [Nat.lt_add_right_iff_pos]
+    apply h
+  )
+
+def Slice.getUInt16 (slice : Slice) (h : slice.len ≥ 2 := by decide) : UInt16 :=
+  let seg := slice.msg.segments.uget slice.start.segIdx.toUSize (by
+    simpa using (slice.segValid)
+  )
+  seg.data.ugetUInt16LE slice.start.idx.toUSize (by
+    have := slice.idxValid
+    apply Nat.lt_of_lt_of_le ?_ this
+    simp [Nat.add_lt_add_iff_left]
+    apply h
+  )
+
+def Slice.getUInt32 (slice : Slice) (h : slice.len ≥ 4 := by decide) : UInt32 :=
+  let seg := slice.msg.segments.uget slice.start.segIdx.toUSize (by
+    simpa using (slice.segValid)
+  )
+  seg.data.ugetUInt32LE slice.start.idx.toUSize (by
+    have := slice.idxValid
+    apply Nat.lt_of_lt_of_le ?_ this
+    simp [Nat.add_lt_add_iff_left]
+    apply h
+  )
+
+def Slice.getUInt64 (slice : Slice) (h : slice.len ≥ 8 := by decide) : UInt64 :=
+  let seg := slice.msg.segments.uget slice.start.segIdx.toUSize (by
+    simpa using (slice.segValid)
+  )
+  seg.data.ugetUInt64LE slice.start.idx.toUSize (by
+    have := slice.idxValid
+    apply Nat.lt_of_lt_of_le ?_ this
+    simp [Nat.add_lt_add_iff_left]
+    apply h
+  )
 end
 
 end Message
 
-structure AnyPointer where
+structure Pointer where
   data : UInt64
-deriving Inhabited, Repr
 
-namespace AnyPointer
+namespace Pointer
 
-def isNull (p : AnyPointer) : Bool := p.data = 0
+def isNull (p : Pointer) : Bool := p.data = 0
 
-def isStruct (p : AnyPointer) : Bool :=
+def isStruct (p : Pointer) : Bool :=
   p.data &&& 0x3 = 0
-def isList (p : AnyPointer) : Bool :=
+def isList (p : Pointer) : Bool :=
   p.data &&& 0x3 = 1
-def isFar (p : AnyPointer) : Bool :=
+def isFar (p : Pointer) : Bool :=
   p.data &&& 0x3 = 2
-def isOther (p : AnyPointer) : Bool :=
+def isOther (p : Pointer) : Bool :=
   p.data &&& 0x3 = 3
 
-instance : ToString AnyPointer where
+instance : ToString Pointer where
   toString p :=
     let digits := Nat.toDigits 16 p.data.toNat
     let digits := List.leftpad 16 '0' digits
     String.mk ('0' :: 'x' :: digits)
-end AnyPointer
+end Pointer
 
-structure SegmentPointer extends AnyPointer where
-  isStruct_or_isList : toAnyPointer.isStruct ∨ toAnyPointer.isList
+structure SegmentPointer extends Pointer where
+  isStruct_or_isList : toPointer.isStruct ∨ toPointer.isList
     := by first | decide | simp_all
 
 namespace SegmentPointer
@@ -226,8 +320,8 @@ def size (s : ListPointer) : UInt32 :=
 
 end ListPointer
 
-structure FarPointer extends AnyPointer where
-  isFar : toAnyPointer.isFar := by first | decide | simp_all
+structure FarPointer extends Pointer where
+  isFar : toPointer.isFar := by first | decide | simp_all
 
 
 namespace FarPointer
@@ -282,22 +376,12 @@ def toLoc (p : FarPointer) : Message.Loc :=
 
 end FarPointer
 
-structure OtherPointer extends AnyPointer where
-  isOther : toAnyPointer.isOther
+structure OtherPointer extends Pointer where
+  isOther : toPointer.isOther
 
 namespace OtherPointer
 instance : Inhabited OtherPointer := ⟨⟨⟨3⟩, by decide⟩⟩
 end OtherPointer
-
-structure DataPointer extends ListPointer where
-  h : toListPointer.elemSize = 2 := by first | decide | simp_all
-
-namespace DataPointer
-instance : Inhabited DataPointer where
-  default := {
-    data := 0x200000001
-  }
-end DataPointer
 
 /-- CapnProto specific meaning here.
 Default value should be the same as a value where everything is zero. -/
@@ -314,21 +398,16 @@ instance : HasDefault Int8  := ⟨show UInt8 from 0⟩
 instance : HasDefault Int16 := ⟨show UInt16 from 0⟩
 instance : HasDefault Int32 := ⟨show UInt32 from 0⟩
 instance : HasDefault Int64 := ⟨show UInt64 from 0⟩
-instance : HasDefault AnyPointer := ⟨⟨show UInt64 from 0⟩⟩
+instance : HasDefault Pointer := ⟨⟨show UInt64 from 0⟩⟩
 end HasDefault
 
-structure Struct where
-  start : Message.Loc
+/-! ## Actual CapnProto Types -/
+
+structure Struct extends Message.Slice where
   (dataWords ptrWords : UInt16)
+  hlen : len.toNat = 8 * (dataWords.toNat + ptrWords.toNat)
 
 namespace Struct
-
-instance : HasDefault Struct where
-  default := {
-    start := default
-    dataWords := 0
-    ptrWords := 0
-  }
 
 class IsStruct (α : Type) where
   fromStruct : Struct → α
@@ -395,6 +474,8 @@ inductive ElemSizeError
   | structGotBool
 
 end List
+
+
 
 namespace AnyPointer
 
@@ -926,12 +1007,12 @@ def Data.getBytes (d : Data) : DecodeM ByteArray := do
   let len := d.elemCt
   let msg := (← read)
   let some seg := msg.segments.get? start.segIdx.val
-    | throw (.messageOOB <| Message.OutOfBounds.seg start msg.segments.size)
+    | throw (.messageOOB {loc := start, len := len.val})
   if start.idx.val + len.val ≤ seg.data.size then
     let res := seg.data.copySlice start.idx.val (ByteArray.mkEmpty len.val) 0 len.val
     return res
   else
-    throw (.messageOOB <| Message.OutOfBounds.idx start len.val seg.data.size)
+    throw (.messageOOB {loc := start, len := len.val})
 
 def Text := Data
 instance : Struct.HasStructAccessor Text :=
