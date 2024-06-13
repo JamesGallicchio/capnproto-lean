@@ -544,6 +544,8 @@ inductive DecodeErr
 | resolveErr (e : AnyPointer.ResolveError)
 | listOOB (e : List.OutOfBounds)
 | listElemSize (e : List.ElemSizeError)
+| utf8Error
+| enumOOB
 
 instance : Coe Message.OutOfBounds DecodeErr := ⟨DecodeErr.messageOOB⟩
 instance : Coe AnyPointer.ResolveError DecodeErr := ⟨DecodeErr.resolveErr⟩
@@ -604,7 +606,7 @@ def uint8 (offset : UInt32) : DecodeM UInt8 := do
 @[inline]
 def uint16 (offset : UInt32) : DecodeM UInt16 := do
   if offset < 8 * self.dataWords.toUInt32 then
-    (← read).getUInt16 (self.start.plusBytes offset)
+    (← read).getUInt16 (self.start.plusBytes (2 * offset))
   else
     return HasDefault.default
 
@@ -612,7 +614,7 @@ def uint16 (offset : UInt32) : DecodeM UInt16 := do
 @[inline]
 def uint32 (offset : UInt32) : DecodeM UInt32 := do
   if offset < 8 * self.dataWords.toUInt32 then
-    (← read).getUInt32 (self.start.plusBytes offset)
+    (← read).getUInt32 (self.start.plusBytes (4 * offset))
   else
     return HasDefault.default
 
@@ -620,7 +622,7 @@ def uint32 (offset : UInt32) : DecodeM UInt32 := do
 @[inline]
 def uint64 (offset : UInt32) : DecodeM UInt64 := do
   if offset < 8 * self.dataWords.toUInt32 then
-    (← read).getUInt64 (self.start.plusBytes offset)
+    (← read).getUInt64 (self.start.plusBytes (8 * offset))
   else
     return HasDefault.default
 
@@ -914,16 +916,30 @@ instance [CanList α] : Struct.HasStructAccessor (P α) where
 end List
 
 def Data := List.UInt8
+instance : Struct.HasStructAccessor Data :=
+  inferInstanceAs (Struct.HasStructAccessor (List.P UInt8))
+instance : List.CanList Data :=
+  inferInstanceAs (List.CanList (List.P UInt8))
 
-def Data.getBytes (d : Data) : ReaderT Message (Except Message.OutOfBounds) ByteArray := do
+def Data.getBytes (d : Data) : DecodeM ByteArray := do
   let start := d.start
   let len := d.elemCt
   let msg := (← read)
-  let some seg := msg.segments.get? start.segIdx.val | throw (Message.OutOfBounds.seg start msg.segments.size)
+  let some seg := msg.segments.get? start.segIdx.val
+    | throw (.messageOOB <| Message.OutOfBounds.seg start msg.segments.size)
   if start.idx.val + len.val ≤ seg.data.size then
     let res := seg.data.copySlice start.idx.val (ByteArray.mkEmpty len.val) 0 len.val
     return res
   else
-    throw (Message.OutOfBounds.idx start len.val seg.data.size)
+    throw (.messageOOB <| Message.OutOfBounds.idx start len.val seg.data.size)
 
 def Text := Data
+instance : Struct.HasStructAccessor Text :=
+  inferInstanceAs (Struct.HasStructAccessor Data)
+instance : List.CanList Text :=
+  inferInstanceAs (List.CanList Data)
+def Text.getString (t : Text) : DecodeM String := do
+  let bytes ← Data.getBytes t
+  let some res := String.fromUTF8? bytes
+    | throw .utf8Error
+  return res
