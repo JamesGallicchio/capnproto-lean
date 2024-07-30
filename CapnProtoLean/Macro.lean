@@ -7,13 +7,39 @@ namespace CapnProtoLean.Macro
 
 open Lean CodeAction Elab Command Meta Qq
 
+instance [Pure m] : MonadLift _root_.Id m where
+  monadLift m := pure m
+
 structure State where
   nameMap : Batteries.HashMap Id Name
 
-def typeToLean (t : «Type») (state : State) : TermElabM Term := do
-  match t with
-  | .mk body =>
-  match body with
+def State.new : State := {
+  nameMap := .empty
+}
+
+abbrev T (m) := StateT State (DecodeT m)
+
+def _root_.StateT.monadMap (f : {β : _} → m β → n β)
+  : StateT σ m α → StateT σ n α :=
+  fun st s => f (st s)
+
+def DecodeT.monadMap (f : {β : _} → m β → n β)
+  : DecodeT m α → DecodeT n α :=
+    fun dt msg => f (dt msg)
+
+def T.monadMap [Monad m] [Monad n] (f : {β : _} → m β → n β) : T m α → T n α :=
+  StateT.monadMap (DecodeT.monadMap f)
+
+instance [Monad m] : MonadLift DecodeM (T m) where
+  monadLift dm :=
+    have : DecodeT m _ := DecodeT.monadMap liftM dm
+    liftM this
+
+instance [MonadError m] : MonadError (T m) :=
+  inferInstanceAs (MonadError (StateT _ (ReaderT _ _)))
+
+partial def typeToLean (t : «Type») : T TermElabM Term := do
+  match ← t.cases with
   | .void    => return mkIdent ``Unit
   | .bool    => return mkIdent ``Bool
   | .int8    => return mkIdent ``Int8
@@ -28,71 +54,73 @@ def typeToLean (t : «Type») (state : State) : TermElabM Term := do
   | .float64 => return mkIdent ``Float64
   | .text    => return mkIdent ``Text
   | .data    => return mkIdent ``Data
-  | .list elementType  => return Syntax.mkApp (mkIdent ``List.P) #[← typeToLean elementType state]
-  | .enum typeId brand =>
-    let some name := state.nameMap.find? typeId
-        | throwError "typeToLean called on unrecognized enum {typeId}"
+  | .list list =>
+    return Syntax.mkApp (mkIdent ``List.P) #[
+      ← typeToLean (← list.elementType)]
+  | .enum enum =>
+    let some name := (State.nameMap <| ← get).find? (← enum.typeId)
+        | throwError "typeToLean called on unrecognized enum {← enum.typeId}"
     `($(mkIdent name))
-  | .struct typeId brand =>
-    let some name := state.nameMap.find? typeId
-        | throwError "typeToLean called on unrecognized struct {typeId}"
+  | .struct struct =>
+    let some name := (State.nameMap <| ← get).find? (← struct.typeId)
+        | throwError "typeToLean called on unrecognized struct {← struct.typeId}"
     `($(mkIdent name))
-  | .interface typeId brand =>
+  | .interface interface =>
     throwError "typeToLean called on interface (not yet supported)"
   | .anyPointer a =>
     throwError "typeToLean called on anypointer (unsure where this comes up!)"
 
-def genTopLevel (c : CodeGeneratorRequest) : CommandElabM (TSyntaxArray `command) := do
-  let {nodes,capnpVersion:=_, sourceInfo:=_, requestedFiles:=_} := c
-  let state : State := Id.run do
-    let mut res := .empty
-    for n in nodes do
-      match n with
-      | .mk (id := id) (displayName := displayName) (body := body) .. =>
-      match body with
-      | .struct .. =>
-        let tyName : Name := .mkSimple displayName
-        res := res.insert id tyName
-      | _ => pure ()
-    return {nameMap := res}
+def genTopLevel (c : CodeGeneratorRequest) : T CommandElabM (TSyntaxArray `command) := do
+  let nodes ← c.nodes
+  for n in nodes do
+    match ← n.cases with
+    | .struct .. =>
+      let displayName ← (← n.displayName).getString
+      let afterPrefix :=
+        displayName.toSubstring.extract
+          (displayName.find (· = ':'))
+          displayName.endPos
+        |>.toString
+      let tyName : Name := .mkSimple afterPrefix
+      let id ← n.id
+      modify (σ := State) fun | {nameMap} => {nameMap := nameMap.insert id tyName}
+    | _ => pure ()
   -- Generate declarations to declare all the type aliases we need
   let typeDefs : Syntax.TSepArray `command "\n" ← (do
     let mut res := #[]
     for n in nodes do
-      match n with
-      | .mk (id := id) (body := .struct dataWordCount ptrCount ..) .. =>
-        let name := state.nameMap.find! id
+      match ← n.cases with
+      | .struct struct =>
+        let name := (← get).nameMap.find! (← n.id)
         res := res.push (← `(
           def $(mkIdent name) : Type := $(mkIdent ``Struct)
         ))
         res := res.push (← `(
           instance : $(mkIdent ``Struct.IsStruct) $(mkIdent name) where
             $(mkIdent `fromStruct) := $(mkIdent ``id)
-            $(mkIdent `expectedDataWords) := $(Syntax.mkNumLit <| toString dataWordCount)
-            $(mkIdent `expectedPtrWords) := $(Syntax.mkNumLit <| toString ptrCount)
+            $(mkIdent `expectedDataWords) := $(Syntax.mkNumLit <| toString (← struct.dataWordCount))
+            $(mkIdent `expectedPtrWords) := $(Syntax.mkNumLit <| toString (← struct.pointerCount))
         ))
       | _ => continue
     return res)
+  -- Generate interfaces for each of the type aliases we have
   let methodDefs : TSyntaxArray `command ← (do
     let mut res := #[]
     for n in nodes do
-      match n with
-      | .mk (id := id) (body := body) .. =>
-      match body with
-      | .struct dataWordCount pointerCount _preferredListEncoding _isGroup
-          discriminantCount discriminantOffset
-          fields =>
-        let tyName := state.nameMap.find! id
-        for f in fields do
-          match f with
-          | .mk (name := name) (body := body) .. =>
-          match body with
-          | .slot offset type .. =>
+      match ← n.cases with
+      | .struct struct =>
+        let tyName := (← get).nameMap.find! (← n.id)
+        for f in (← struct.fields) do
+          match ← f.cases with
+          | .slot slot =>
+            let name ← (← f.name).getString
+            let resType : Term ←
+              T.monadMap liftTermElabM (typeToLean (← slot.type))
             let type : Term :=
-              Syntax.mkApp (mkIdent ``DecodeM) #[← liftTermElabM <| typeToLean type state]
+              Syntax.mkApp (mkIdent ``DecodeM) #[resType]
             let impl : Term :=
               Syntax.mkApp (mkIdent ``Struct.HasStructAccessor.get)
-                #[mkIdent `self, Syntax.mkNumLit <| toString offset]
+                #[mkIdent `self, Syntax.mkNumLit <| toString (← slot.offset)]
             res := res.push (← `(
               def $(mkIdent <| tyName.str name) ($(mkIdent `self) : $(mkIdent tyName)) : $type := $impl
             ))
@@ -141,7 +169,6 @@ def genTopLevel (c : CodeGeneratorRequest) : CommandElabM (TSyntaxArray `command
   return typeDefs ++ methodDefs
 
 def readAndGen (files : Term) : CommandElabM (TSyntaxArray `command) := do
-/-
   let files ← liftTermElabM <| do
     let expr ← Term.elabTerm files (some q(Array System.FilePath))
     unsafe evalExpr (Array System.FilePath) (q(Array System.FilePath)) expr
@@ -175,19 +202,12 @@ def readAndGen (files : Term) : CommandElabM (TSyntaxArray `command) := do
     logError m!"capnpc returned {← capnpc.wait}"
     throw e
 
-  let req : CodeGeneratorRequest ←
-    match decode CodeGeneratorRequest.decoder msg with
-    | .ok (some req) => pure req
-    | .ok none => throwError "root was none?"
-    | .error e =>
-      throwError s!"decode error: {e}"
--/
-  let req ← liftTermElabM <| do
-    let expr ← Term.elabTerm files (some q(CodeGeneratorRequest))
-    unsafe evalExpr (CodeGeneratorRequest) (q(CodeGeneratorRequest)) expr
-
-
-  genTopLevel req
+  match ← msg.decodeRoot (m := CommandElabM) CodeGeneratorRequest fun req =>
+    let x := genTopLevel req
+    StateT.run' (s := State.new) x
+  with
+  | Except.ok syn => sorry
+  | Except.error e => sorry
 
 
 syntax (name := generate_capnproto)

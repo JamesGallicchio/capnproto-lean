@@ -22,7 +22,7 @@ structure Loc where
   segIdx : UInt32
   /-- Index within a segment, in *bytes* -/
   idx : UInt32
-deriving Inhabited
+deriving Inhabited, Repr
 
 namespace Loc
 
@@ -42,43 +42,10 @@ instance : ToString Loc where
 
 end Loc
 
-/-- Read a `Message` in by repeatedly reading from a handle `h` -/
-partial def fromHandle (h : IO.FS.Handle) : IO Message := do
-  -- Number of segments is the first UInt32 of the stream, plus 1
-  let sizeSegs ← try (do
-    let numSegs := (← readUInt32) + 1
-    let mut sizeSegs := #[]
-    for _ in [0:numSegs.val] do
-      sizeSegs := sizeSegs.push (← readUInt32)
-    if (4 + numSegs*4) % 8 = 4 then
-      let _ ← readUInt32
-    return sizeSegs)
-    catch _ => throw (.userError "Failed to parse message header")
-  let segs : Array Segment ← sizeSegs.mapM (fun size =>
-    return {data := ← readBytesExact (8 * size.toUSize)}
-  )
-  return {segments := segs}
-where
-  readUInt32 : IO UInt32 := do
-    let bytes ← readBytesExact 4
-    if h : bytes.size = 4 then
-      return bytes.ugetUInt32LE 0 (by rw [h]; decide)
-    throw (.userError s!"readBytesExact: expected 4 bytes, got {bytes.size}")
-  readBytesExact (size : USize) : IO ByteArray := do
-    readBytesExactAux size (ByteArray.mkEmpty size.val)
-  readBytesExactAux (size : USize) (acc : ByteArray) : IO ByteArray := do
-    if size = 0 then
-      return acc
-    let new ← h.read size
-    let newLen := new.size.toUSize
-    if newLen = 0 then
-      throw (.userError s!"readBytesExact: reached EOF")
-    let acc := acc ++ new
-    readBytesExactAux (size - newLen) acc
-
 inductive OutOfBounds
   | seg (loc : Message.Loc) (segs : Nat)
   | idx (loc : Message.Loc) (len : Nat) (segLen : Nat)
+deriving Repr
 
 variable (m : Message) (l : Loc) in
 section
@@ -156,6 +123,7 @@ end AnyPointer
 structure SegmentPointer extends AnyPointer where
   isStruct_or_isList : toAnyPointer.isStruct ∨ toAnyPointer.isList
     := by first | decide | simp_all
+deriving Repr
 
 namespace SegmentPointer
 
@@ -196,6 +164,7 @@ end StructPointer
 
 structure ListPointer extends SegmentPointer where
   isList : toSegmentPointer.isList := by first | decide | simp_all
+deriving Repr
 
 namespace ListPointer
 instance : Inhabited ListPointer where
@@ -228,7 +197,7 @@ end ListPointer
 
 structure FarPointer extends AnyPointer where
   isFar : toAnyPointer.isFar := by first | decide | simp_all
-
+deriving Repr
 
 namespace FarPointer
 instance : Inhabited FarPointer := ⟨⟨⟨2⟩, by decide⟩⟩
@@ -320,6 +289,7 @@ end HasDefault
 structure Struct where
   start : Message.Loc
   (dataWords ptrWords : UInt16)
+deriving Repr
 
 namespace Struct
 
@@ -382,6 +352,7 @@ def elemWidth : UInt32 :=
 
 structure OutOfBounds where
   (elemCt idx : UInt32)
+deriving Repr
 
 @[inline]
 def getLocOfIdx (i : UInt32) : Except OutOfBounds Message.Loc :=
@@ -393,6 +364,7 @@ def getLocOfIdx (i : UInt32) : Except OutOfBounds Message.Loc :=
 inductive ElemSizeError
   | prim (expected actual : UInt8)
   | structGotBool
+deriving Repr
 
 end List
 
@@ -407,6 +379,7 @@ inductive ResolveError
   | oob (p : ListPointer) (oob : Message.OutOfBounds)
   | oob2 (fp : FarPointer) (oob : Message.OutOfBounds)
   | oob3 (fp lp : FarPointer) (oob : Message.OutOfBounds)
+deriving Repr
 
 abbrev ReadM := ReaderT Message <| Except ResolveError
 
@@ -457,7 +430,7 @@ private def resolveStructPtr (loc : Message.Loc) (p : AnyPointer) : ReadM Struct
 where
   handleSegPointer (p : StructPointer) := do
     return {
-      start := {segIdx := loc.segIdx, idx := loc.idx + p.offset + 1}
+      start := loc.plusWords ((show UInt32 from p.offset) + 1)
       dataWords := p.dataSize
       ptrWords := p.pointerSize
     }
@@ -546,34 +519,45 @@ inductive DecodeErr
 | listElemSize (e : List.ElemSizeError)
 | utf8Error
 | enumOOB
+deriving Repr
 
 instance : Coe Message.OutOfBounds DecodeErr := ⟨DecodeErr.messageOOB⟩
 instance : Coe AnyPointer.ResolveError DecodeErr := ⟨DecodeErr.resolveErr⟩
 instance : Coe List.OutOfBounds DecodeErr := ⟨DecodeErr.listOOB⟩
 instance : Coe List.ElemSizeError DecodeErr := ⟨DecodeErr.listElemSize⟩
 
-def DecodeM := ReaderT Message <| Except DecodeErr
-deriving Monad, MonadReader, MonadExcept
+def DecodeT (m) := ReaderT Message <| ExceptT DecodeErr m
 
-instance : MonadLift (AnyPointer.ReadM) DecodeM where
+instance [Monad m] : Monad (DecodeT m) :=
+  inferInstanceAs (Monad (ReaderT _ _))
+
+instance [Monad m] : MonadExcept DecodeErr (DecodeT m) :=
+  inferInstanceAs (MonadExcept _ (ReaderT _ _))
+
+instance [Monad m] : MonadReader Message (DecodeT m) :=
+  inferInstanceAs (MonadReader _ (ReaderT _ _))
+
+abbrev DecodeM := DecodeT Id
+
+instance [Monad m] : MonadLift (AnyPointer.ReadM) (DecodeT m) where
 monadLift m := do
     match m (← read) with
     | .ok a => return a
     | .error e => throw (↑e)
 
-instance : MonadLift (Except Message.OutOfBounds) DecodeM where
+instance [Monad m] : MonadLift (Except Message.OutOfBounds) (DecodeT m) where
 monadLift m := do
     match m with
     | .ok a => return a
     | .error e => throw (↑e)
 
-instance : MonadLift (Except List.OutOfBounds) DecodeM where
+instance [Monad m] : MonadLift (Except List.OutOfBounds) (DecodeT m) where
 monadLift m := do
     match m with
     | .ok a => return a
     | .error e => throw (↑e)
 
-instance : MonadLift (Except List.ElemSizeError) DecodeM where
+instance [Monad m] : MonadLift (Except List.ElemSizeError) (DecodeT m) where
 monadLift m := do
     match m with
     | .ok a => return a
@@ -913,6 +897,16 @@ instance [CanList α] : Struct.HasStructAccessor (P α) where
     let l ← Struct.list s off
     CanList.fromList l
 
+instance [CanList α] [MonadLift DecodeM m] : ForIn m (P α) α where
+  forIn L acc f := do
+    let mut acc := acc
+    let mut i : UInt32 := 0
+    while i < L.size do
+      match ← f (← L.get i) acc with
+      | .yield a => acc := a
+      | .done a => return a
+    return acc
+
 end List
 
 def Data := List.UInt8
@@ -943,3 +937,48 @@ def Text.getString (t : Text) : DecodeM String := do
   let some res := String.fromUTF8? bytes
     | throw .utf8Error
   return res
+
+namespace Message
+
+/-- Read a `Message` in by repeatedly reading from a handle `h` -/
+partial def fromHandle (h : IO.FS.Handle) : IO Message := do
+  -- Number of segments is the first UInt32 of the stream, plus 1
+  let sizeSegs ← try (do
+    let numSegs := (← readUInt32) + 1
+    let mut sizeSegs := #[]
+    for _ in [0:numSegs.val] do
+      sizeSegs := sizeSegs.push (← readUInt32)
+    if (4 + numSegs*4) % 8 = 4 then
+      let _ ← readUInt32
+    return sizeSegs)
+    catch _ => throw (.userError "Failed to parse message header")
+  let segs : Array Segment ← sizeSegs.mapM (fun size =>
+    return {data := ← readBytesExact (8 * size.toUSize)}
+  )
+  return {segments := segs}
+where
+  readUInt32 : IO UInt32 := do
+    let bytes ← readBytesExact 4
+    if h : bytes.size = 4 then
+      return bytes.ugetUInt32LE 0 (by rw [h]; decide)
+    throw (.userError s!"readBytesExact: expected 4 bytes, got {bytes.size}")
+  readBytesExact (size : USize) : IO ByteArray := do
+    readBytesExactAux size (ByteArray.mkEmpty size.val)
+  readBytesExactAux (size : USize) (acc : ByteArray) : IO ByteArray := do
+    if size = 0 then
+      return acc
+    let new ← h.read size
+    let newLen := new.size.toUSize
+    if newLen = 0 then
+      throw (.userError s!"readBytesExact: reached EOF")
+    let acc := acc ++ new
+    readBytesExactAux (size - newLen) acc
+
+def decodeRoot [Monad m] (α : Type) [Struct.IsStruct α]
+    (msg : Message) (f : α → DecodeT m β) : ExceptT DecodeErr m β := do
+  let p : AnyPointer := ⟨← liftM (m := Except DecodeErr) <|
+    (msg.getUInt64 ⟨0,0⟩).mapError DecodeErr.messageOOB⟩
+  let s : Struct ← liftM (m := Except DecodeErr)
+      (p.resolveStructPtr ⟨0,0⟩ msg |>.mapError DecodeErr.resolveErr)
+  let a : α := Struct.IsStruct.fromStruct s
+  (f a) msg
