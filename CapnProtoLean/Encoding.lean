@@ -1,11 +1,9 @@
 import CapnProtoLean.Int
+import CapnProtoLean.Upstream
+
 import Batteries
 
 namespace CapnProtoLean
-
-instance : Repr ByteArray where
-  reprPrec arr prec :=
-    .group ("ByteArray.mk" ++ .line ++ reprPrec arr.data prec)
 
 structure Segment where
   data : ByteArray
