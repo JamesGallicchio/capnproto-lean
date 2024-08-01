@@ -2,6 +2,7 @@ import Batteries
 import Qq
 
 import CapnProtoLean.Schema
+import CapnProtoLean.Lean.Int
 
 namespace CapnProtoLean.Macro
 
@@ -26,9 +27,9 @@ def typeToLean (t : «Type») (state : State) : TermElabM Term := do
   | .uint64  => return mkIdent ``UInt64
   | .float32 => return mkIdent ``Float32
   | .float64 => return mkIdent ``Float64
-  | .text    => return mkIdent ``Text
-  | .data    => return mkIdent ``Data
-  | .list elementType  => return Syntax.mkApp (mkIdent ``List.P) #[← typeToLean elementType state]
+  | .text    => return mkIdent ``String
+  | .data    => return mkIdent ``ByteArray
+  | .list elementType  => return Syntax.mkApp (mkIdent ``Array) #[← typeToLean elementType state]
   | .enum typeId brand =>
     let some name := state.nameMap.find? typeId
         | throwError "typeToLean called on unrecognized enum {typeId}"

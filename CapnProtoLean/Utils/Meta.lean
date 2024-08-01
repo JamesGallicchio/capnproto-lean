@@ -1,6 +1,6 @@
 import Batteries
 
-namespace CapnProtoLean.Meta
+namespace CapnProtoLean.Utils
 
 open Lean Elab Command
 
@@ -11,9 +11,6 @@ scoped elab "declare_nonempty_type" id:ident : command => do
     def $id : Type := ($ptd).type
     instance : Nonempty $id := ($ptd).property
   )
-
-inductive hi
-| what
 
 scoped elab "declare_view" id:ident as:ident : command => do
   elabCommand <| ← `(

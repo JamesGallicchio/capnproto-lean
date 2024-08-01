@@ -1,4 +1,4 @@
-import CapnProtoLean.CapnpText
+import CapnProtoLean.Bootstrap.CapnpText
 import CapnProtoLean.Schema
 
 namespace CapnProtoLean

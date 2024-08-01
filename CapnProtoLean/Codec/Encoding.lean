@@ -1,5 +1,5 @@
-import CapnProtoLean.Int
-import CapnProtoLean.Upstream
+import CapnProtoLean.Lean.Int
+import CapnProtoLean.Utils.Upstream
 
 import Batteries
 

@@ -1,5 +1,5 @@
-import CapnProtoLean.Encoding
-import CapnProtoLean.Meta
+import CapnProtoLean.Codec.Encoding
+import CapnProtoLean.Utils.Meta
 
 namespace CapnProtoLean
 
