@@ -2,8 +2,8 @@ import CapnProtoLean.Bootstrap.CapnpSchema
 import CapnProtoLean.Bootstrap.CapnpText
 import CapnProtoLean.Bootstrap.SchemaCodec
 import CapnProtoLean.Codec.Encoding
+import CapnProtoLean.Lean.Int
 import CapnProtoLean.Lean.Macro
 import CapnProtoLean.Schema
-import CapnProtoLean.Utils.Int
 import CapnProtoLean.Utils.Meta
 import CapnProtoLean.Utils.Upstream
